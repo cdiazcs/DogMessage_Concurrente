@@ -19,7 +19,7 @@
 | Partición de red | PENDIENTE | Mayoría/minoría y explicación | — |
 | Métricas de latencia y throughput | PENDIENTE | CSV, método de medición y comparación | — |
 | Reportes automáticos | PENDIENTE | Script que produzca archivo y gráfico sin inventar datos | — |
-| Arquitectura y diagramas de protocolo | PARCIAL: diseño inicial | Diagramas reales, RequestVote y AppendEntries y segundo algoritmo | — |
+| Arquitectura y diagramas de protocolo | PARCIAL: [diseño DM2 propuesto](../protocol/CONTRATO_TCP_v2.md) y [diagramas Raft](../protocol/diagramas-raft.md) | Validar los intercambios Raft implementados y documentar el segundo algoritmo | — |
 | Informe PDF | PENDIENTE | Informe coherente con lo realmente implementado | — |
 | Presentación PDF + demo | PENDIENTE | Diapositivas, secuencia de demo y pruebas en vivo | — |
 | ZIP final Univirtual sin temporales | PENDIENTE | Fuentes + informe/presentación PDF según enunciado | — |

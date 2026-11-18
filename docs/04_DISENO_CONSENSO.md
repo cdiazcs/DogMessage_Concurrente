@@ -36,4 +36,7 @@ Reutilizar el mismo cliente, tamaño y cantidad de mensajes, red, hardware y met
 
 ## Especificación que el grupo debe aprobar antes de codificar
 
-`protocol/CONTRATO_TCP_v2.md` (todavía no existe): formato binario, tipos de mensaje, orden de campos, endianess, límites y codificación de entradas de log. Escribir fixtures y pruebas de codificar/decodificar en los 3 lenguajes; después abrir las ramas de RPC.
+La propuesta está en el [contrato DM2](../protocol/CONTRATO_TCP_v2.md). Incluye
+el formato binario, el registro de tipos, los diagramas y los fixtures. Revisar
+el contrato entre los tres integrantes antes de implementar los codecs y las RPC
+según el [plan de interoperabilidad](../protocol/PLAN_INTEROPERABILIDAD_DM2.md).
