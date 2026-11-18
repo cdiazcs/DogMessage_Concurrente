@@ -25,3 +25,26 @@
 | ZIP final Univirtual sin temporales | PENDIENTE | Fuentes + informe/presentación PDF según enunciado | — |
 
 **Meta:** cerrar cada pendiente mediante PR, test, evidencia y actualización de esta tabla. No marcar como listo sin ejecutar la demostración.
+
+## Evidencia Java de fase II
+
+El nodo Java incorpora transporte TCP concurrente, framing mixto DM1/DM2 y
+validación de RPC con el JDK. La prueba local usa manejadores simulados y los
+fixtures compartidos para verificar codificación, rechazo y correlación. El
+proceso `NodeMain` todavía cierra las solicitudes DM2 válidas sin respuesta
+cuando requieren un manejador de consenso o de aplicación. Las tramas inválidas
+siguen las reglas de rechazo del contrato.
+
+```bash
+out=$(mktemp -d)
+javac --release 17 -Xlint:all -Werror -d "$out" \
+  nodes/java/src/dogmessenger/NodeMain.java \
+  nodes/java/test/dogmessenger/TransportTest.java
+java -cp "$out" dogmessenger.TransportTest
+python3 tools/smoke_test.py
+```
+
+El script Ubuntu configura `n1,n2,n3` como réplicas. En un arranque manual
+`--members n1,n2,n3` activa esa lista y, si se omite, solo se configura el ID
+local. La ejecución local verifica DM2 en Java y repite los PING DM1 de los tres
+lenguajes. La matriz DM2 entre lenguajes, la LAN y el consenso están pendientes.
