@@ -1,5 +1,7 @@
 package dogmessenger;
 
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -7,21 +9,35 @@ import java.net.SocketTimeoutException;
 import java.nio.BufferUnderflowException;
 import java.nio.ByteBuffer;
 import java.nio.channels.CancelledKeyException;
+import java.nio.channels.Channels;
 import java.nio.channels.ClosedChannelException;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
@@ -36,6 +52,8 @@ public final class NodeMain {
 
     public static void main(String[] args) {
         String id = null, host = "0.0.0.0", target = null, configuredMembers = null;
+        Path dataDir = null;
+        Map<String, InetSocketAddress> peers = new HashMap<>();
         int port = 9101;
         try {
             for (int i = 0; i < args.length; i++) {
@@ -45,6 +63,8 @@ public final class NodeMain {
                     case "--port" -> port = Integer.parseInt(args[++i]);
                     case "--ping" -> target = args[++i];
                     case "--members" -> configuredMembers = args[++i];
+                    case "--data-dir" -> dataDir = Path.of(args[++i]);
+                    case "--peer" -> addPeer(peers, args[++i]);
                     default -> throw new IllegalArgumentException("Argumento desconocido " + args[i]);
                 }
             }
@@ -59,17 +79,56 @@ public final class NodeMain {
                 return;
             }
 
-            Set<String> members = configuredMembers == null ? Set.of(id)
+            Set<String> members = configuredMembers == null ? new HashSet<>(peers.keySet())
                     : Set.copyOf(Arrays.asList(configuredMembers.split(",", -1)));
-            var dispatcher = new RpcDispatcher(id, members, new RpcHandler() {});
-            try (var server = new TcpServer(new InetSocketAddress(host, port), dispatcher, 16, 32)) {
-                System.out.println("[JAVA " + id + "] LISTEN " + host + ":" + server.port() + " protocol=DM1+DM2");
-                server.serve();
+            if (configuredMembers == null) members.add(id);
+            InetSocketAddress listen = new InetSocketAddress(host, port);
+            if (dataDir == null) {
+                require(peers.isEmpty(), "--peer requiere --data-dir");
+                serve(id, listen, members, new RpcHandler() {}, () -> {});
+            } else {
+                try (var raft = new RaftNode(id, members, peers, dataDir)) {
+                    Thread shutdown = new Thread(raft::shutdown, "raft-shutdown");
+                    Runtime.getRuntime().addShutdownHook(shutdown);
+                    try {
+                        serve(id, listen, members, raft, raft::start);
+                    } finally {
+                        try {
+                            Runtime.getRuntime().removeShutdownHook(shutdown);
+                        } catch (IllegalStateException stopping) {
+                            // La JVM ya está ejecutando los hooks.
+                        }
+                    }
+                }
             }
         } catch (Exception error) {
             System.err.println("ERROR " + error.getMessage());
             System.exit(1);
         }
+    }
+
+    private static void serve(String id, InetSocketAddress listen, Set<String> members, RpcHandler handler,
+                              Runnable start) throws IOException {
+        var dispatcher = new RpcDispatcher(id, members, handler);
+        try (var server = new TcpServer(listen, dispatcher, 16, 32)) {
+            System.out.println("[JAVA " + id + "] LISTEN " + listen.getHostString() + ":" + server.port()
+                    + " protocol=DM1+DM2");
+            start.run();
+            server.serve();
+        }
+    }
+
+    private static void addPeer(Map<String, InetSocketAddress> peers, String argument) {
+        int equals = argument.indexOf('=');
+        int colon = argument.lastIndexOf(':');
+        require(equals > 0 && colon > equals + 1, "Usa --peer ID=HOST:PUERTO");
+        String peer = argument.substring(0, equals);
+        requireId(peer);
+        int port = Integer.parseInt(argument.substring(colon + 1));
+        require(port > 0, "El puerto del peer debe ser positivo");
+        var endpoint = new InetSocketAddress(argument.substring(equals + 1, colon), port);
+        require(!endpoint.isUnresolved(), "Host de peer inválido: " + endpoint.getHostString());
+        require(peers.putIfAbsent(peer, endpoint) == null, "Peer repetido: " + peer);
     }
 
     private static void require(boolean condition, String message) {
@@ -413,6 +472,336 @@ public final class NodeMain {
         default VoteResponse requestVote(Header header, RequestVote vote) throws IOException { return null; }
         default AppendResponse appendEntries(Header header, AppendEntries append) throws IOException { return null; }
         default ClientResult clientCommand(Header header, ClientCommand command) throws IOException { return null; }
+    }
+
+    public enum RaftRole { FOLLOWER, CANDIDATE, LEADER }
+
+    /** Gestionado bajo el monitor de RaftNode. Cada reinicio sortea un plazo nuevo. */
+    static final class ElectionTimer {
+        private long deadline;
+
+        void reset() {
+            long delay = ThreadLocalRandom.current().nextLong(500, 901);
+            deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(delay);
+        }
+
+        boolean expired(long now) { return now - deadline >= 0; }
+    }
+
+    public static final class RaftNode implements RpcHandler, AutoCloseable {
+        private static final LogPosition ORIGIN = new LogPosition(0, 0);
+        private static final long HEARTBEAT_INTERVAL = TimeUnit.MILLISECONDS.toNanos(125);
+        private final String id;
+        private final Map<String, InetSocketAddress> peers;
+        private final int majority;
+        private final TermStore store;
+        private final ElectionTimer electionTimer = new ElectionTimer();
+        private final ScheduledExecutorService clock = Executors.newSingleThreadScheduledExecutor();
+        private final ExecutorService outbound;
+        private final TcpClient client = new TcpClient();
+        private final Set<String> votes = new HashSet<>();
+        private final Set<String> inFlight = new HashSet<>();
+        private TermState state;
+        private RaftRole role = RaftRole.FOLLOWER;
+        private String leader;
+        private long nextHeartbeat;
+        private boolean started;
+        private boolean stopped;
+
+        public RaftNode(String id, Set<String> members, Map<String, InetSocketAddress> peers, Path dataDir)
+                throws IOException {
+            requireId(id);
+            Set<String> expectedPeers = new HashSet<>(members);
+            members.forEach(NodeMain::requireId);
+            require(expectedPeers.remove(id), "La membresía debe incluir al nodo local");
+            this.peers = Map.copyOf(peers);
+            require(expectedPeers.equals(this.peers.keySet()), "Configura un endpoint por cada otra réplica");
+            require(this.peers.values().stream().distinct().count() == this.peers.size(),
+                    "Los endpoints de los peers deben ser distintos");
+            this.id = id;
+            majority = members.size() / 2 + 1;
+            store = new TermStore(dataDir, id, Set.copyOf(members));
+            state = store.initial;
+            outbound = Executors.newFixedThreadPool(Math.max(1, this.peers.size()));
+        }
+
+        public synchronized void start() {
+            if (started || stopped) throw new IllegalStateException("Raft ya iniciado o cerrado");
+            started = true;
+            electionTimer.reset();
+            log("startup");
+            clock.scheduleWithFixedDelay(this::tick, 0, 25, TimeUnit.MILLISECONDS);
+        }
+
+        private synchronized void tick() {
+            if (stopped) return;
+            long now = System.nanoTime();
+            try {
+                if (role == RaftRole.LEADER) {
+                    if (now - nextHeartbeat >= 0) broadcastHeartbeat(now);
+                } else if (electionTimer.expired(now)) {
+                    beginElection();
+                }
+            } catch (IOException failure) {
+                // persist() ya detuvo Raft; el listener puede seguir atendiendo DM1.
+            }
+        }
+
+        private void beginElection() throws IOException {
+            if (state.term() == Long.MAX_VALUE) {
+                failStop("término agotado");
+                return;
+            }
+            persist(new TermState(state.term() + 1, id));
+            votes.clear();
+            votes.add(id);
+            electionTimer.reset();
+            transition(RaftRole.CANDIDATE, null, "election");
+            if (votes.size() >= majority) {
+                becomeLeader();
+            } else {
+                broadcast(new RequestVote(state.term(), ORIGIN), RaftRole.CANDIDATE);
+            }
+        }
+
+        private void becomeLeader() {
+            transition(RaftRole.LEADER, id, "majority");
+            broadcastHeartbeat(System.nanoTime());
+        }
+
+        private void broadcastHeartbeat(long now) {
+            nextHeartbeat = now + HEARTBEAT_INTERVAL;
+            broadcast(new AppendEntries(state.term(), ORIGIN, 0, List.of()), RaftRole.LEADER);
+        }
+
+        private void broadcast(Payload request, RaftRole expectedRole) {
+            long term = state.term();
+            for (var peer : peers.entrySet()) {
+                if (inFlight.add(peer.getKey())) {
+                    outbound.execute(() -> send(peer.getKey(), peer.getValue(), request, expectedRole, term));
+                }
+            }
+        }
+
+        private void send(String peer, InetSocketAddress endpoint, Payload request, RaftRole expectedRole, long term) {
+            Payload response = null;
+            try {
+                synchronized (this) {
+                    if (!isCurrent(expectedRole, term)) return;
+                }
+                response = client.call(endpoint, peer, id, request).payload();
+            } catch (IOException unavailable) {
+                // La ausencia de respuesta no cuenta como voto ni reinicia plazos.
+            } finally {
+                synchronized (this) {
+                    inFlight.remove(peer);
+                    if (response != null && isCurrent(expectedRole, term)) {
+                        try {
+                            acceptResponse(peer, response);
+                        } catch (IOException failure) {
+                            // El fallo de persistencia ya detuvo el nodo Raft.
+                        }
+                    }
+                }
+            }
+        }
+
+        private boolean isCurrent(RaftRole expectedRole, long term) {
+            return !stopped && role == expectedRole && state.term() == term;
+        }
+
+        private void acceptResponse(String peer, Payload response) throws IOException {
+            if (response instanceof VoteResponse vote) {
+                if (vote.term() > state.term()) observeHigherTerm(vote.term());
+                else if (vote.voteGranted() && votes.add(peer) && votes.size() >= majority) becomeLeader();
+            } else if (response instanceof AppendResponse heartbeat && heartbeat.term() > state.term()) {
+                observeHigherTerm(heartbeat.term());
+            }
+        }
+
+        /** El comparador está listo para recibir la posición persistida cuando se implemente el log. */
+        static boolean upToDate(LogPosition candidate, LogPosition local) {
+            return candidate.term() > local.term()
+                    || (candidate.term() == local.term() && candidate.index() >= local.index());
+        }
+
+        @Override public synchronized VoteResponse requestVote(Header header, RequestVote vote) throws IOException {
+            ensureAvailable();
+            if (vote.term() > state.term()) observeHigherTerm(vote.term());
+            String candidate = header.senderId();
+            boolean granted = vote.term() == state.term()
+                    && (state.votedFor() == null || state.votedFor().equals(candidate))
+                    && upToDate(vote.lastLog(), ORIGIN);
+            if (granted) {
+                if (state.votedFor() == null) persist(new TermState(state.term(), candidate));
+                electionTimer.reset();
+            }
+            return new VoteResponse(state.term(), granted);
+        }
+
+        @Override public synchronized AppendResponse appendEntries(Header header, AppendEntries append)
+                throws IOException {
+            ensureAvailable();
+            if (append.term() > state.term()) observeHigherTerm(append.term());
+            if (append.term() < state.term() || (role == RaftRole.LEADER && !id.equals(header.senderId()))) {
+                return new AppendResponse(state.term(), false, 0);
+            }
+            transition(RaftRole.FOLLOWER, header.senderId(), "heartbeat");
+            electionTimer.reset();
+            boolean supported = append.entries().isEmpty() && append.prevLog().equals(ORIGIN);
+            return new AppendResponse(state.term(), supported, 0);
+        }
+
+        @Override public synchronized ClientResult clientCommand(Header header, ClientCommand command)
+                throws IOException {
+            ensureAvailable();
+            if (role == RaftRole.LEADER) return new ClientResult(2, 0, null);
+            return new ClientResult(1, 0, leader);
+        }
+
+        private void observeHigherTerm(long term) throws IOException {
+            boolean wasLeader = role == RaftRole.LEADER;
+            persist(new TermState(term, null));
+            votes.clear();
+            if (wasLeader) electionTimer.reset();
+            role = RaftRole.FOLLOWER;
+            leader = null;
+            log("higher-term");
+        }
+
+        private void transition(RaftRole next, String knownLeader, String reason) {
+            boolean changed = next != role || !Objects.equals(knownLeader, leader);
+            role = next;
+            leader = knownLeader;
+            if (changed || next == RaftRole.CANDIDATE) log(reason);
+        }
+
+        private void log(String reason) {
+            System.out.printf("[RAFT %s] role=%s term=%d leader=%s event=%s%n",
+                    id, role, state.term(), leader == null ? "-" : leader, reason);
+        }
+
+        private void persist(TermState next) throws IOException {
+            try {
+                store.save(next);
+                state = next;
+            } catch (IOException failure) {
+                failStop(failure.toString());
+                throw failure;
+            }
+        }
+
+        private void ensureAvailable() throws IOException {
+            if (stopped) throw new IOException("Raft detenido");
+        }
+
+        private void failStop(String reason) {
+            System.err.printf("[RAFT %s] stopped: %s%n", id, reason);
+            stopExecutors();
+        }
+
+        private void stopExecutors() {
+            stopped = true;
+            clock.shutdownNow();
+            outbound.shutdownNow();
+        }
+
+        private void shutdown() {
+            try {
+                close();
+            } catch (IOException failure) {
+                System.err.println("ERROR cerrando Raft: " + failure);
+            }
+        }
+
+        @Override public synchronized void close() throws IOException {
+            stopExecutors();
+            store.close();
+        }
+    }
+
+    private record TermState(long term, String votedFor) {}
+
+    /** Formato local. Se bloquea el directorio durante toda la ejecución del nodo. */
+    private static final class TermStore implements AutoCloseable {
+        private static final int FORMAT = 0x44525331; // DRS1
+        private final Path directory;
+        private final Path file;
+        private final FileChannel lockChannel;
+        private final String nodeId;
+        private final Set<String> members;
+        private final String membership;
+        private final TermState initial;
+
+        TermStore(Path directory, String nodeId, Set<String> members) throws IOException {
+            this.directory = directory.toAbsolutePath();
+            this.nodeId = nodeId;
+            this.members = members;
+            membership = String.join(",", members.stream().sorted().toList());
+            file = this.directory.resolve("term-state.bin");
+            Files.createDirectories(this.directory);
+            lockChannel = FileChannel.open(this.directory.resolve("raft.lock"),
+                    StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+            try {
+                FileLock lock = lockChannel.tryLock();
+                if (lock == null) throw new IOException("Directorio Raft en uso: " + this.directory);
+                initial = load();
+            } catch (IOException | RuntimeException failure) {
+                try {
+                    close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
+        }
+
+        private TermState load() throws IOException {
+            DataInputStream opened;
+            try {
+                opened = new DataInputStream(Files.newInputStream(file));
+            } catch (NoSuchFileException missing) {
+                TermState fresh = new TermState(0, null);
+                save(fresh);
+                return fresh;
+            }
+            try (DataInputStream input = opened) {
+                if (input.readInt() != FORMAT || !input.readUTF().equals(nodeId)
+                        || !input.readUTF().equals(membership)) {
+                    throw new IOException("Estado Raft incompatible con la identidad o membresía local");
+                }
+                long term = input.readLong();
+                String vote = input.readUTF();
+                if (term < 0 || (!vote.isEmpty() && (term == 0 || !members.contains(vote))) || input.read() != -1) {
+                    throw new IOException("Estado Raft inválido");
+                }
+                return new TermState(term, vote.isEmpty() ? null : vote);
+            }
+        }
+
+        private void save(TermState state) throws IOException {
+            Path temporary = Files.createTempFile(directory, "term-state-", ".tmp");
+            try {
+                try (FileChannel channel = FileChannel.open(temporary, StandardOpenOption.WRITE);
+                     DataOutputStream output = new DataOutputStream(Channels.newOutputStream(channel))) {
+                    output.writeInt(FORMAT);
+                    output.writeUTF(nodeId);
+                    output.writeUTF(membership);
+                    output.writeLong(state.term());
+                    output.writeUTF(state.votedFor() == null ? "" : state.votedFor());
+                    output.flush();
+                    channel.force(true);
+                }
+                Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
+                    parent.force(true);
+                }
+            } finally {
+                Files.deleteIfExists(temporary);
+            }
+        }
+
+        @Override public void close() throws IOException { lockChannel.close(); }
     }
 
     public static final class RpcDispatcher {

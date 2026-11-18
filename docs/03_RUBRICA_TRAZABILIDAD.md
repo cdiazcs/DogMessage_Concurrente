@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 3 nodos en computadoras distintas LAN/WiFi | PARCIAL: ejecutables; LAN por comprobar | Video 3 equipos + puertos/IP + pruebas de comunicación | — |
 | LP1, LP2, LP3, solo SDK y sockets/hilos | PARCIAL: Java, Python, Kotlin TCP | Código comentado y build de tres nodos | — |
-| Raft desde cero | PENDIENTE | Elección, heartbeat, log, commit, recuperación | — |
+| Raft desde cero | PARCIAL: elección y heartbeats en Java | Elección, heartbeat, log, commit, recuperación | — |
 | Segundo algoritmo asignado desde cero | PENDIENTE | Implementación en 3 nodos + comparación con Raft | — |
 | Comunicación cliente desktop/móvil | PENDIENTE | Mensajes en ambos sentidos | — |
 | Versión web (objetivo general) | POR DEFINIR | Confirmar alcance con docente | — |
@@ -14,7 +14,7 @@
 | Imágenes y archivos | PENDIENTE | Hash de integridad + recuperación de contenido | — |
 | Clonación mediante QR | PENDIENTE | Sincronización de historial anterior y autorización | — |
 | Cifrado de extremo a extremo | PENDIENTE | Prueba cliente-cliente y servidor sin texto legible | — |
-| Fallo del líder / nueva elección | PENDIENTE | Logs con término/líder y demo en vivo | — |
+| Fallo del líder / nueva elección | PARCIAL: prueba automática con tres procesos Java en loopback | Logs con término/líder y demo en vivo | — |
 | Caída de seguidor / recuperación | PENDIENTE | Igualdad de índices/entradas comprometidas | — |
 | Partición de red | PENDIENTE | Mayoría/minoría y explicación | — |
 | Métricas de latencia y throughput | PENDIENTE | CSV, método de medición y comparación | — |
@@ -30,9 +30,9 @@
 
 El nodo Java incorpora transporte TCP concurrente, framing mixto DM1/DM2 y
 validación de RPC con el JDK. La prueba local usa manejadores simulados y los
-fixtures compartidos para verificar codificación, rechazo y correlación. El
-proceso `NodeMain` todavía cierra las solicitudes DM2 válidas sin respuesta
-cuando requieren un manejador de consenso o de aplicación. Las tramas inválidas
+fixtures compartidos para verificar codificación, rechazo y correlación. En modo de
+transporte, el proceso `NodeMain` cierra las solicitudes DM2 válidas sin
+respuesta cuando requieren un manejador de consenso o de aplicación. Las tramas inválidas
 siguen las reglas de rechazo del contrato.
 
 ```bash
@@ -47,4 +47,11 @@ python3 tools/smoke_test.py
 El script Ubuntu configura `n1,n2,n3` como réplicas. En un arranque manual
 `--members n1,n2,n3` activa esa lista y, si se omite, solo se configura el ID
 local. La ejecución local verifica DM2 en Java y repite los PING DM1 de los tres
-lenguajes. La matriz DM2 entre lenguajes, la LAN y el consenso están pendientes.
+lenguajes. La matriz DM2 entre lenguajes y la LAN están pendientes.
+
+## Evidencia Java de fase III
+
+[Configuración y pruebas de elección Raft](06_RAFT_JAVA.md). La prueba con tres
+procesos Java en loopback cubre elección por mayoría, heartbeats, caída del
+líder, reelección y reinicio con estado persistido. La replicación de
+entradas, el compromiso y las pruebas de clúster en LAN quedan pendientes.
