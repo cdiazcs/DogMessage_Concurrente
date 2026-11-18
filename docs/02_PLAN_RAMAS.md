@@ -1,15 +1,22 @@
 # Hitos y ramas independientes
 
-## Fase inicial (crear PR hacia main)
+## Fase I y ramas por lenguaje
 
-| Área | Rama inicial | Archivos principales | Prueba de aceptación |
+| Rama | Responsabilidad | Archivos principales | Criterio de integración |
 |---|---|---|---|
-| Java, Ubuntu | `feat/java-raft-state` | `nodes/java/` | Tests de término/voto y arranque |
-| Python, Windows | `feat/python-raft-state` | `nodes/python/` | Tests de término/voto y arranque |
-| Kotlin, Windows | `feat/kotlin-raft-state` | `nodes/kotlin/` | Tests de término/voto y arranque |
-| Contrato conjunto | `docs/raft-wire-v2` | `protocol/` | Aprobado por los tres **antes** de consumidores |
+| `main` | Base estable compartida | Repositorio integrado | PR revisado y pruebas de regresión |
+| `java` | Nodo Java en Ubuntu | `nodes/java/` | Codec y RPC Java con los fixtures comunes |
+| `python` | Nodo Python en Windows | `nodes/python/` | Codec y RPC Python con los fixtures comunes |
+| `kotlin` | Nodo Kotlin/JVM en Windows | `nodes/kotlin/` | Codec y RPC Kotlin con los fixtures comunes |
+| `docs/dm2` | Diseño de fase I | `protocol/`, `docs/` | Revisión del contrato y fixtures por los tres integrantes |
 
-Cada integrante puede desarrollar estados locales mientras se aprueba el formato de mensajes Raft. No enviar aún RPC entre nodos hasta que el contrato esté estable.
+Integrar primero el [contrato DM2](../protocol/CONTRATO_TCP_v2.md) mediante un PR de
+`docs/dm2` hacia `main`. Tras su aprobación, sincronizar `java`, `python` y `kotlin`
+desde `main`. Usar ramas cortas derivadas de `main` para tareas acotadas según
+[CONTRIBUTING](../CONTRIBUTING.md) y dirigir los PR a `main`. Evitar dependencias
+entre ramas de lenguajes usando los fixtures compartidos y pares simulados hasta
+que las tres implementaciones estén disponibles. Las RPC de consenso se implementan
+en las fases siguientes.
 
 ## Fases siguientes
 
