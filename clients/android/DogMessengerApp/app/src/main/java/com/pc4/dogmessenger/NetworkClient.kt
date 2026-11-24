@@ -8,13 +8,16 @@ import java.io.DataOutputStream
 import java.net.InetSocketAddress
 import java.net.Socket
 
-class NetworkClient(private val serverIp: String, private val serverPort: Int) {
+class NetworkClient(
+    private val serverIp: String,
+    private val serverPort: Int,
+    private val claveSecreta: String // Nueva variable para el cifrado
+) {
 
     private var socket: Socket? = null
     private var output: DataOutputStream? = null
     private var input: DataInputStream? = null
 
-    // Nos conectamos al Nodo Kotlin (Servidor)
     suspend fun conectar(): Boolean = withContext(Dispatchers.IO) {
         try {
             socket = Socket()
@@ -32,15 +35,15 @@ class NetworkClient(private val serverIp: String, private val serverPort: Int) {
         }
     }
 
-    // Enviar un mensaje de chat usando CLIENT_COMMAND (0x03)
     suspend fun enviarMensaje(mensaje: String, miId: String): Boolean = withContext(Dispatchers.IO) {
         try {
             val requestId = ByteArray(16).also { java.util.Random().nextBytes(it) }
             val senderBytes = miId.toByteArray(Charsets.US_ASCII)
-            val commandBytes = mensaje.toByteArray(Charsets.UTF_8)
 
-            // Calculamos tamaños:
-            // Payload: command(u32 longitud + bytes)
+            // 1. ENCRIPTAMOS EL MENSAJE ANTES DE ENVIARLO
+            val mensajeEncriptado = CryptoUtils.encriptar(mensaje, claveSecreta)
+            val commandBytes = mensajeEncriptado.toByteArray(Charsets.UTF_8)
+
             val payloadSize = 4 + commandBytes.size
             val bodyLength = 4 + 1 + 1 + 16 + 1 + senderBytes.size + payloadSize
 
@@ -59,7 +62,7 @@ class NetworkClient(private val serverIp: String, private val serverPort: Int) {
             output?.write(commandBytes)
             output?.flush()
 
-            Log.d("NetworkClient", "Mensaje enviado: $mensaje")
+            Log.d("NetworkClient", "Mensaje cifrado enviado: $mensajeEncriptado")
             return@withContext true
         } catch (e: Exception) {
             Log.e("NetworkClient", "Error al enviar: ${e.message}")

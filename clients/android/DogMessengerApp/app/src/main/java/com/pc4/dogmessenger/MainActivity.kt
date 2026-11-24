@@ -24,13 +24,14 @@ class MainActivity : ComponentActivity() {
     private lateinit var networkClient: NetworkClient
     private var ipServidor by mutableStateOf("")
     private var puertoServidor by mutableStateOf(0)
+    private var claveServidor by mutableStateOf("")
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         setContent {
             DogMessengerAppTheme {
-                // Estado para saber si ya escaneamos el QR
+                // Estado para saber si ya escaneamos el QR y estamos conectados
                 var conexionLista by remember { mutableStateOf(false) }
 
                 // Lanzador para abrir la pantalla de escaneo
@@ -39,14 +40,17 @@ class MainActivity : ComponentActivity() {
                 ) { result ->
                     if (result.resultCode == Activity.RESULT_OK) {
                         val qrData = result.data?.getStringExtra("qr_data") ?: ""
-                        // El QR tendrá el formato: "IP:PUERTO:TOKEN" (ej. "192.168.1.45:9105:ABC123")
+                        // El QR tiene el formato: "IP:PUERTO:CLAVE" (ej. "192.168.1.45:9105:MI_CLAVE")
                         val partes = qrData.split(":")
                         if (partes.size >= 2) {
                             ipServidor = partes[0]
                             puertoServidor = partes[1].toIntOrNull() ?: 9105
 
-                            // Nos conectamos automáticamente
-                            networkClient = NetworkClient(ipServidor, puertoServidor)
+                            // Si el QR trae una clave (3ra parte), la usamos. Si no, una por defecto.
+                            claveServidor = if (partes.size >= 3) partes[2] else "CLAVE_POR_DEFECTO"
+
+                            // Nos conectamos automáticamente pasándole la clave para el cifrado
+                            networkClient = NetworkClient(ipServidor, puertoServidor, claveServidor)
                             lifecycleScope.launch {
                                 val ok = networkClient.conectar()
                                 if (ok) conexionLista = true
@@ -79,6 +83,7 @@ class MainActivity : ComponentActivity() {
                         serverIp = ipServidor,
                         onSendMessage = { mensaje ->
                             lifecycleScope.launch {
+                                // Enviamos el mensaje (NetworkClient lo cifrará antes de salir)
                                 networkClient.enviarMensaje(mensaje, "app_android")
                             }
                         }
@@ -99,11 +104,15 @@ fun ChatScreen(serverIp: String, onSendMessage: (String) -> Unit) {
         topBar = { TopAppBar(title = { Text("Conectado a $serverIp") }) }
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+
+            // Lista de mensajes
             LazyColumn(modifier = Modifier.weight(1f).padding(16.dp)) {
                 items(mensajes) { msg ->
                     Text(text = msg, modifier = Modifier.padding(4.dp))
                 }
             }
+
+            // Caja de texto y botón enviar
             Row(modifier = Modifier.fillMaxWidth().padding(8.dp)) {
                 OutlinedTextField(
                     value = texto,

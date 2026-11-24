@@ -35,7 +35,6 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
                 val tiempoActual = System.currentTimeMillis()
                 
                 synchronized(lock) {
-                    // Si no soy líder y pasó el tiempo de timeout, inicio elección
                     if (estado != EstadoRaft.LEADER && (tiempoActual - lastHeartbeatTime) > electionTimeout) {
                         iniciarEleccion()
                     }
@@ -54,13 +53,11 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
         }
     }
 
-    // Llamado desde NodeMain cuando entra un mensaje DM2
     fun procesarMensajeDm2(body: ByteArray, output: DataOutputStream) {
         try {
             val header = Dm2Protocol.leerHeader(body)
             if (header.algorithm != Dm2Protocol.ALGORITHM_RAFT) return
 
-            // Creamos un stream para leer el payload (saltando el header)
             val input = DataInputStream(ByteArrayInputStream(body))
             input.skipBytes(4 + 1 + 1 + 16 + 1 + header.senderId.length)
 
@@ -76,24 +73,22 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
                     val prevLogIndex = input.readLong()
                     val prevLogTerm = input.readLong()
                     val leaderCommit = input.readLong()
-                    // TODO: Leer entryCount y las entradas
                     manejarAppendEntries(header.senderId, term, prevLogIndex, prevLogTerm, leaderCommit)
                 }
                 
                 // =========================================================
-                // NUEVO CASO: Recibir mensaje desde la App Android (0x03)
+                // RECIBIR MENSAJE DE LA APP ANDROID Y DESENCRIPTAR
                 // =========================================================
                 0x03 -> {
                     val commandLen = input.readInt()
                     val commandBytes = ByteArray(commandLen)
                     input.readFully(commandBytes)
-                    val mensajeTexto = String(commandBytes, Charsets.UTF_8)
+                    val mensajeEncriptado = String(commandBytes, Charsets.UTF_8)
                     
-                    println("[$myId] ¡Mensaje recibido de la App Android!: $mensajeTexto")
+                    // Desencriptamos con la misma clave que pusimos en el QR
+                    val mensajeDesencriptado = desencriptarAES(mensajeEncriptado, "CLAVE_SECRETA_DEL_QR")
                     
-                    // TODO: Si este nodo es el LÍDER, debería agregar este mensaje a su log
-                    // y enviarlo a los demás nodos por AppendEntries para replicarlo.
-                    // Por ahora, solo lo mostramos en consola para confirmar la conexión.
+                    println("[$myId] ¡Mensaje recibido de la App Android!: $mensajeDesencriptado")
                 }
             }
         } catch (e: Exception) {
@@ -110,11 +105,9 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
         
         println("[$myId] Iniciando elección. Término: $currentTerm")
         
-        // Voto por mí mismo
         var votosRecibidos = 1
         val mayoria = (otrosNodos.size + 1) / 2 + 1
         
-        // Calcular último log
         val lastLogIndex = if (log.isEmpty()) 0L else log.last().index
         val lastLogTerm = if (log.isEmpty()) 0L else log.last().term
 
@@ -123,12 +116,12 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
                 val votoConcedido = Dm2Protocol.enviarRequestVote(ip, puerto, currentTerm, lastLogIndex, lastLogTerm, myId)
                 if (votoConcedido) {
                     synchronized(lock) {
-                        if (estado == EstadoRaft.CANDIDATE) { // Verificar que siga siendo candidato
+                        if (estado == EstadoRaft.CANDIDATE) {
                             votosRecibidos++
                             if (votosRecibidos >= mayoria) {
                                 estado = EstadoRaft.LEADER
                                 println("[$myId] ¡ELEGIDO LÍDER para el término $currentTerm!")
-                                enviarHeartbeats() // Enviar inmediatamente al ser elegido
+                                enviarHeartbeats()
                             }
                         }
                     }
@@ -141,17 +134,13 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
         var votoConcedido = false
         
         synchronized(lock) {
-            // 1. Si el término del candidato es mayor, actualizo mi término y paso a seguidor
             if (term > currentTerm) {
                 currentTerm = term
                 estado = EstadoRaft.FOLLOWER
                 votedFor = null
-                // TODO: Persistir currentTerm y votedFor aquí
             }
 
-            // 2. Evalúo si le doy el voto
             if (term == currentTerm && (votedFor == null || votedFor == candidatoId)) {
-                // Verificar que su log sea al menos tan actual como el mío
                 val miLastLogIndex = if (log.isEmpty()) 0L else log.last().index
                 val miLastLogTerm = if (log.isEmpty()) 0L else log.last().term
                 
@@ -160,18 +149,16 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
                 if (logAlDia) {
                     votoConcedido = true
                     votedFor = candidatoId
-                    lastHeartbeatTime = System.currentTimeMillis() // Reiniciar timer porque le di el voto
-                    electionTimeout = Random.nextLong(1500, 3000) // Reiniciar timeout
-                    // TODO: Persistir votedFor aquí
+                    lastHeartbeatTime = System.currentTimeMillis()
+                    electionTimeout = Random.nextLong(1500, 3000)
                 }
             }
         }
 
         println("[$myId] RequestVote de $candidatoId (Término $term). Concedido: $votoConcedido")
 
-        // Enviar respuesta
         try {
-            val payloadSize = 8 + 1 // term (R64) + voteGranted (Bool u8)
+            val payloadSize = 8 + 1
             val senderBytes = myId.toByteArray(Charsets.US_ASCII)
             val bodyLength = 4 + 1 + 1 + 16 + 1 + senderBytes.size + payloadSize
             
@@ -188,19 +175,12 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
 
     private fun manejarAppendEntries(liderId: String, term: Long, prevLogIndex: Long, prevLogTerm: Long, leaderCommit: Long) {
         synchronized(lock) {
-            if (term < currentTerm) {
-                return // Ignorar
-            }
+            if (term < currentTerm) return
             
-            // Es un líder válido, reiniciar timeout
             estado = EstadoRaft.FOLLOWER
             currentTerm = term
             lastHeartbeatTime = System.currentTimeMillis()
-            electionTimeout = Random.nextLong(1500, 3000) // <-- IMPORTANTE: Evita que el seguidor inicie elecciones
-            
-            // TODO: Verificar prevLogIndex/prevLogTerm contra nuestro log local.
-            // Si coincide, aceptar entradas y actualizar commitIndex.
-            // Si no coincide, responder con success=0.
+            electionTimeout = Random.nextLong(1500, 3000)
         }
     }
 
@@ -212,6 +192,28 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
             thread {
                 Dm2Protocol.enviarAppendEntries(ip, puerto, currentTerm, lastLogIndex, lastLogTerm, commitIndex, myId)
             }
+        }
+    }
+
+    // =========================================================
+    // FUNCIÓN PARA DESENCRIPTAR EL MENSAJE (AES)
+    // =========================================================
+    private fun desencriptarAES(textoEncriptadoBase64: String, claveSecreta: String): String {
+        return try {
+            val claveBytes = ByteArray(16)
+            val clavesOriginales = claveSecreta.toByteArray(Charsets.UTF_8)
+            System.arraycopy(clavesOriginales, 0, claveBytes, 0, minOf(clavesOriginales.size, 16))
+            
+            val secretKey = javax.crypto.spec.SecretKeySpec(claveBytes, "AES")
+            val iv = byteArrayOf(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            val cipher = javax.crypto.Cipher.getInstance("AES/CBC/PKCS5Padding")
+            cipher.init(javax.crypto.Cipher.DECRYPT_MODE, secretKey, javax.crypto.spec.IvParameterSpec(iv))
+            
+            val bytesDecodificados = java.util.Base64.getDecoder().decode(textoEncriptadoBase64)
+            val bytesDesencriptados = cipher.doFinal(bytesDecodificados)
+            String(bytesDesencriptados, Charsets.UTF_8)
+        } catch (e: Exception) {
+            "[Error de desencriptación: ${e.message}]"
         }
     }
 }
