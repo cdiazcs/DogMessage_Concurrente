@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 3 nodos en computadoras distintas LAN/WiFi | PARCIAL: ejecutables; LAN por comprobar | Video 3 equipos + puertos/IP + pruebas de comunicación | — |
 | LP1, LP2, LP3, solo SDK y sockets/hilos | PARCIAL: Java, Python, Kotlin TCP | Código comentado y build de tres nodos | — |
-| Raft desde cero | PARCIAL: elección y heartbeats en Java | Elección, heartbeat, log, commit, recuperación | — |
+| Raft desde cero | PARCIAL: elección, replicación, compromiso y recuperación en Java y loopback | Integración entre lenguajes y pruebas LAN | — |
 | Segundo algoritmo asignado desde cero | PENDIENTE | Implementación en 3 nodos + comparación con Raft | — |
 | Comunicación cliente desktop/móvil | PENDIENTE | Mensajes en ambos sentidos | — |
 | Versión web (objetivo general) | POR DEFINIR | Confirmar alcance con docente | — |
@@ -55,3 +55,26 @@ lenguajes. La matriz DM2 entre lenguajes y la LAN están pendientes.
 procesos Java en loopback cubre elección por mayoría, heartbeats, caída del
 líder, reelección y reinicio con estado persistido. La replicación de
 entradas, el compromiso y las pruebas de clúster en LAN quedan pendientes.
+
+## Evidencia Java de fase IV-A
+
+[Diseño y pruebas del log local](06_RAFT_JAVA.md#log-local-de-fase-iv-a).
+La suite de log verifica escrituras concurrentes, reapertura, colas incompletas
+y detección de corrupción. La prueba de caída del líder verifica que su
+entrada local `NO_OP` sobreviva a la terminación abrupta del proceso.
+
+## Evidencia Java de fase IV-B
+
+[Diseño y pruebas de replicación](06_RAFT_JAVA.md#replicación-de-fase-iv-b).
+La prueba de tres procesos en loopback comprueba el retroceso de
+`nextIndex`, la reparación de un sufijo divergente y la recuperación
+tras desconexión.
+
+## Evidencia Java de fase IV-C
+
+[Compromiso y recuperación](06_RAFT_JAVA.md#compromiso-y-recuperación-de-fase-iv-c).
+Las pruebas cubren compromiso con dos de tres, ausencia de nuevas
+confirmaciones al perder mayoría, caída del líder después de confirmar,
+reconciliación, recuperación del índice y aplicación única por solicitud.
+La integración DM2 trilingüe, la LAN y las mediciones de rendimiento
+del clúster quedan pendientes.

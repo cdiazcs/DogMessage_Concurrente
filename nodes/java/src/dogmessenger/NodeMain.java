@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,6 +42,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.zip.CRC32C;
 
 /** Punto de entrada y componentes TCP. Los builds del starter compilan este archivo directamente. */
 public final class NodeMain {
@@ -53,6 +55,7 @@ public final class NodeMain {
     public static void main(String[] args) {
         String id = null, host = "0.0.0.0", target = null, configuredMembers = null;
         Path dataDir = null;
+        boolean inspect = false;
         Map<String, InetSocketAddress> peers = new HashMap<>();
         int port = 9101;
         try {
@@ -64,11 +67,13 @@ public final class NodeMain {
                     case "--ping" -> target = args[++i];
                     case "--members" -> configuredMembers = args[++i];
                     case "--data-dir" -> dataDir = Path.of(args[++i]);
+                    case "--inspect" -> inspect = true;
                     case "--peer" -> addPeer(peers, args[++i]);
                     default -> throw new IllegalArgumentException("Argumento desconocido " + args[i]);
                 }
             }
             requireId(id);
+            require(!inspect || (dataDir != null && target == null), "--inspect requiere --data-dir");
             if (target != null) {
                 int separator = target.lastIndexOf(':');
                 if (separator <= 0) throw new IllegalArgumentException("Usa --ping IP:PUERTO");
@@ -88,6 +93,10 @@ public final class NodeMain {
                 serve(id, listen, members, new RpcHandler() {}, () -> {});
             } else {
                 try (var raft = new RaftNode(id, members, peers, dataDir)) {
+                    if (inspect) {
+                        printRaftState(raft.snapshot());
+                        return;
+                    }
                     Thread shutdown = new Thread(raft::shutdown, "raft-shutdown");
                     Runtime.getRuntime().addShutdownHook(shutdown);
                     try {
@@ -104,6 +113,18 @@ public final class NodeMain {
         } catch (Exception error) {
             System.err.println("ERROR " + error.getMessage());
             System.exit(1);
+        }
+    }
+
+    private static void printRaftState(RaftNode.Snapshot snapshot) {
+        System.out.printf("role=%s term=%d leader=%s commitIndex=%d lastApplied=%d lastLogIndex=%d appliedCommands=%s%n",
+                snapshot.role(), snapshot.term(), snapshot.leader(), snapshot.commitIndex(), snapshot.lastApplied(),
+                snapshot.log().size(), snapshot.appliedCommandIndexes());
+        for (RaftLog.LogEntry entry : snapshot.log()) {
+            System.out.printf("index=%d term=%d type=%s status=%s client=%s requestId=%s%n",
+                    entry.index(), entry.term(), entry.type(),
+                    entry.index() <= snapshot.commitIndex() ? "COMMITTED" : "PENDING",
+                    entry.clientId(), entry.requestId());
         }
     }
 
@@ -210,7 +231,8 @@ public final class NodeMain {
                                 List<LogEntry> entries) implements Payload {
         public AppendEntries {
             require(term > 0 && Objects.requireNonNull(prevLog).term() <= term, "Término de réplica inválido");
-            require(leaderCommit >= 0 && entries.size() <= 256, "Commit o cantidad de entradas inválidos");
+            require(leaderCommit >= 0 && entries.size() <= MessageCodec.MAX_APPEND_ENTRIES,
+                    "Commit o cantidad de entradas inválidos");
             entries = List.copyOf(entries);
             require(prevLog.index() <= Long.MAX_VALUE - entries.size(), "Índice fuera de R64");
             long previousTerm = prevLog.term();
@@ -282,6 +304,9 @@ public final class NodeMain {
     /** Codifica el cuerpo DM2. El prefijo TCP pertenece a la capa de framing. */
     public static final class MessageCodec {
         public static final int MAX_BODY = 1_048_576;
+        private static final int MAX_APPEND_ENTRIES = 256;
+        private static final int HEADER_BYTES = 23; // Incluye la longitud de senderId.
+        private static final int APPEND_FIXED_BYTES = 34;
         public static final int RAFT = 1;
         public static final int REQUEST_VOTE = 0x01, APPEND_ENTRIES = 0x02, CLIENT_COMMAND = 0x03;
         public static final int VOTE_RESPONSE = 0x81, APPEND_RESPONSE = 0x82, CLIENT_RESULT = 0x83, ERROR = 0xff;
@@ -332,24 +357,44 @@ public final class NodeMain {
             LogPosition previous = readPosition(input);
             long commit = input.getLong();
             int count = Short.toUnsignedInt(input.getShort());
-            require(count <= 256 && count <= input.remaining() / 9, "Cantidad de entradas inválida");
+            require(count <= MAX_APPEND_ENTRIES && count <= input.remaining() / 9, "Cantidad de entradas inválida");
             List<LogEntry> entries = new ArrayList<>(count);
-            for (int i = 0; i < count; i++) {
-                long entryTerm = input.getLong();
-                LogEntry entry = switch (u8(input)) {
-                    case 0 -> new NoOpEntry(entryTerm);
-                    case 1 -> new CommandEntry(entryTerm, readNode(input, false), readId(input), readCommand(input));
-                    default -> throw new IllegalArgumentException("Tipo de entrada inválido");
-                };
-                entries.add(entry);
-            }
+            for (int i = 0; i < count; i++) entries.add(readEntry(input));
             return new AppendEntries(term, previous, commit, entries);
+        }
+
+        private static LogEntry readEntry(ByteBuffer input) {
+            long term = input.getLong();
+            return switch (u8(input)) {
+                case 0 -> new NoOpEntry(term);
+                case 1 -> new CommandEntry(term, readNode(input, false), readId(input), readCommand(input));
+                default -> throw new IllegalArgumentException("Tipo de entrada inválido");
+            };
+        }
+
+        private static void putEntry(ByteBuffer output, LogEntry entry) {
+            output.putLong(entry.term());
+            if (entry instanceof CommandEntry command) {
+                output.put((byte) 1);
+                putNode(output, command.clientId());
+                putId(output, command.clientRequestId());
+                putCommand(output, command.command());
+            } else {
+                output.put((byte) 0);
+            }
+        }
+
+        private static int entrySize(LogEntry entry) {
+            if (entry instanceof CommandEntry command) {
+                return 30 + command.clientId().length() + command.command().bytes.length;
+            }
+            return 9;
         }
 
         public static byte[] encode(Message message) throws IOException {
             Header header = message.header();
             Payload payload = message.payload();
-            int size = 23 + header.senderId().length() + payloadSize(payload);
+            int size = HEADER_BYTES + header.senderId().length() + payloadSize(payload);
             if (size > MAX_BODY) throw new IOException("Cuerpo DM2 excede el máximo");
             ByteBuffer output = ByteBuffer.allocate(size);
             output.putInt(MAGIC).put((byte) header.algorithm()).put((byte) header.type());
@@ -364,17 +409,7 @@ public final class NodeMain {
                 output.putLong(append.term());
                 putPosition(output, append.prevLog());
                 output.putLong(append.leaderCommit()).putShort((short) append.entries().size());
-                for (LogEntry entry : append.entries()) {
-                    output.putLong(entry.term());
-                    if (entry instanceof CommandEntry command) {
-                        output.put((byte) 1);
-                        putNode(output, command.clientId());
-                        putId(output, command.clientRequestId());
-                        putCommand(output, command.command());
-                    } else {
-                        output.put((byte) 0);
-                    }
-                }
+                for (LogEntry entry : append.entries()) putEntry(output, entry);
             } else if (payload instanceof AppendResponse append) {
                 output.putLong(append.term()).put((byte) (append.success() ? 1 : 0)).putLong(append.matchIndex());
             } else if (payload instanceof ClientCommand command) {
@@ -399,13 +434,8 @@ public final class NodeMain {
                     yield 10 + (hint == null ? 0 : hint.length());
                 }
                 case APPEND_ENTRIES -> {
-                    int size = 34;
-                    for (LogEntry entry : ((AppendEntries) payload).entries()) {
-                        size += 9;
-                        if (entry instanceof CommandEntry command) {
-                            size += 21 + command.clientId().length() + command.command().bytes.length;
-                        }
-                    }
+                    int size = APPEND_FIXED_BYTES;
+                    for (LogEntry entry : ((AppendEntries) payload).entries()) size += entrySize(entry);
                     yield size;
                 }
                 case ERROR -> 1;
@@ -474,6 +504,314 @@ public final class NodeMain {
         default ClientResult clientCommand(Header header, ClientCommand command) throws IOException { return null; }
     }
 
+    /** Log local. Solo publica entradas cuya escritura y sincronización terminaron. */
+    public static final class RaftLog implements AutoCloseable {
+        private static final LogPosition ORIGIN = new LogPosition(0, 0);
+
+        public enum EntryType { NO_OP, COMMAND }
+
+        /** El índice vive en disco. El contenido conserva la representación inmutable que usa DM2. */
+        public record LogEntry(long index, NodeMain.LogEntry entry) {
+            public LogEntry {
+                require(index > 0, "Índice de entrada inválido");
+                Objects.requireNonNull(entry);
+            }
+
+            public long term() { return entry.term(); }
+
+            public EntryType type() {
+                return entry instanceof CommandEntry ? EntryType.COMMAND : EntryType.NO_OP;
+            }
+
+            public String clientId() {
+                return entry instanceof CommandEntry command ? command.clientId() : null;
+            }
+
+            public UUID requestId() {
+                return entry instanceof CommandEntry command ? command.clientRequestId() : null;
+            }
+
+            public byte[] payload() {
+                return entry instanceof CommandEntry command ? command.command().bytes() : new byte[0];
+            }
+        }
+
+        private final LogStorage storage;
+        private final List<LogEntry> entries;
+
+        public RaftLog(Path directory) throws IOException {
+            storage = new LogStorage(directory);
+            try {
+                entries = storage.recover();
+            } catch (IOException | RuntimeException failure) {
+                try {
+                    storage.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
+        }
+
+        public synchronized LogEntry append(NodeMain.LogEntry entry) throws IOException {
+            LogPosition previous = lastPosition();
+            if (previous.index() == Long.MAX_VALUE) throw new IOException("Índice del log agotado");
+            LogEntry next = new LogEntry(previous.index() + 1, entry);
+            require(next.term() >= previous.term(), "El término del log no puede retroceder");
+            storage.append(next);
+            entries.add(next);
+            return next;
+        }
+
+        /** Devuelve null si el índice no identifica una entrada real. */
+        public synchronized LogEntry entryAt(long index) {
+            if (index < 1 || index > entries.size()) return null;
+            return entries.get((int) index - 1);
+        }
+
+        public synchronized LogPosition lastPosition() {
+            if (entries.isEmpty()) return ORIGIN;
+            LogEntry last = entries.get(entries.size() - 1);
+            return new LogPosition(last.index(), last.term());
+        }
+
+        public long lastLogIndex() { return lastPosition().index(); }
+        public long lastLogTerm() { return lastPosition().term(); }
+
+        synchronized boolean matches(LogPosition position) {
+            if (position.equals(ORIGIN)) return true;
+            LogEntry entry = entryAt(position.index());
+            return entry != null && entry.term() == position.term();
+        }
+
+        synchronized boolean merge(AppendEntries append, long commitIndex) throws IOException {
+            if (!matches(append.prevLog())) return false;
+            int keep = (int) append.prevLog().index();
+            List<NodeMain.LogEntry> incoming = append.entries();
+            int firstNew = 0;
+            while (firstNew < incoming.size() && keep < entries.size()
+                    && entries.get(keep).term() == incoming.get(firstNew).term()) {
+                keep++;
+                firstNew++;
+            }
+            if (firstNew == incoming.size()) return true;
+            if (keep < commitIndex) throw new IOException("Conflicto con el prefijo comprometido");
+
+            List<LogEntry> replacement = new ArrayList<>(incoming.size() - firstNew);
+            for (int i = firstNew; i < incoming.size(); i++) {
+                replacement.add(new LogEntry(keep + (long) replacement.size() + 1, incoming.get(i)));
+            }
+            storage.replaceAfter(keep, replacement);
+            entries.subList(keep, entries.size()).clear();
+            entries.addAll(replacement);
+            return true;
+        }
+
+        synchronized AppendEntries batch(long term, long nextIndex, String senderId, long commitIndex) {
+            long previousIndex = nextIndex - 1;
+            LogPosition previous = previousIndex == 0 ? ORIGIN
+                    : new LogPosition(previousIndex, entries.get((int) (previousIndex - 1)).term());
+            int remaining = MessageCodec.MAX_BODY - MessageCodec.HEADER_BYTES - senderId.length()
+                    - MessageCodec.APPEND_FIXED_BYTES;
+            List<NodeMain.LogEntry> batch = new ArrayList<>();
+            for (int i = (int) previousIndex; i < entries.size() && batch.size() < MessageCodec.MAX_APPEND_ENTRIES; i++) {
+                NodeMain.LogEntry entry = entries.get(i).entry();
+                int size = MessageCodec.entrySize(entry);
+                if (size > remaining) break;
+                batch.add(entry);
+                remaining -= size;
+            }
+            return new AppendEntries(term, previous, commitIndex, batch);
+        }
+
+        synchronized LogEntry findCommand(String clientId, UUID requestId) {
+            for (LogEntry entry : entries) {
+                if (entry.entry() instanceof CommandEntry command && command.clientId().equals(clientId)
+                        && command.clientRequestId().equals(requestId)) return entry;
+            }
+            return null;
+        }
+
+        synchronized List<LogEntry> snapshot() { return List.copyOf(entries); }
+
+        @Override public synchronized void close() throws IOException { storage.close(); }
+    }
+
+    /** Journal local con formato versionado por registro. Acceso bajo el monitor de RaftLog. */
+    private static final class LogStorage implements AutoCloseable {
+        private static final int MAGIC = 0x444c4731; // DLG1
+        private static final int HEADER_SIZE = 3 * Integer.BYTES;
+        private static final int MIN_BODY = Long.BYTES + 9;
+        private static final int MAX_BODY = Long.BYTES + 30 + 32 + 65_536;
+        private static final Set<Path> OPEN_DIRECTORIES = new HashSet<>();
+        private final Path directory;
+        private final FileChannel lockChannel;
+        private final FileChannel channel;
+        private final List<Long> offsets = new ArrayList<>();
+        private boolean failed;
+        private boolean closed;
+
+        LogStorage(Path directory) throws IOException {
+            Files.createDirectories(directory);
+            this.directory = directory.toRealPath();
+            synchronized (OPEN_DIRECTORIES) {
+                if (!OPEN_DIRECTORIES.add(this.directory)) throw new IOException("Log Raft en uso: " + directory);
+            }
+            try {
+                lockChannel = FileChannel.open(this.directory.resolve("raft-log.lock"),
+                        StandardOpenOption.CREATE, StandardOpenOption.WRITE);
+                try {
+                    if (lockChannel.tryLock() == null) throw new IOException("Log Raft en uso: " + directory);
+                    channel = openLogFile(this.directory);
+                } catch (IOException | RuntimeException failure) {
+                    closeAfterFailure(lockChannel, failure);
+                    throw failure;
+                }
+            } catch (IOException | RuntimeException failure) {
+                releaseDirectory();
+                throw failure;
+            }
+        }
+
+        private static FileChannel openLogFile(Path directory) throws IOException {
+            FileChannel file = FileChannel.open(directory.resolve("raft-log.bin"), StandardOpenOption.CREATE,
+                    StandardOpenOption.READ, StandardOpenOption.WRITE);
+            try {
+                syncDirectory(directory);
+                return file;
+            } catch (IOException | RuntimeException failure) {
+                closeAfterFailure(file, failure);
+                throw failure;
+            }
+        }
+
+        private static void closeAfterFailure(FileChannel file, Exception failure) {
+            try {
+                file.close();
+            } catch (IOException closeFailure) {
+                failure.addSuppressed(closeFailure);
+            }
+        }
+
+        private void releaseDirectory() {
+            synchronized (OPEN_DIRECTORIES) {
+                OPEN_DIRECTORIES.remove(directory);
+            }
+        }
+
+        List<RaftLog.LogEntry> recover() throws IOException {
+            List<RaftLog.LogEntry> entries = new ArrayList<>();
+            ByteBuffer header = ByteBuffer.allocate(HEADER_SIZE);
+            long lastTerm = 0;
+            long size = channel.size();
+            while (channel.position() < size) {
+                long start = channel.position();
+                if (size - start < HEADER_SIZE) {
+                    truncateTail(start);
+                    break;
+                }
+                readFully(header.clear());
+                int magic = header.getInt();
+                int length = header.getInt();
+                if (magic != MAGIC || length < MIN_BODY || length > MAX_BODY || header.getInt() != ~length) {
+                    throw new IOException("Cabecera inválida en offset " + start);
+                }
+                if (size - channel.position() < length + Integer.BYTES) {
+                    truncateTail(start);
+                    break;
+                }
+                ByteBuffer body = readFully(ByteBuffer.allocate(length + Integer.BYTES));
+                if (body.getInt(length) != checksum(body.array(), 0, length)) {
+                    throw new IOException("CRC inválido en offset " + start);
+                }
+                body.limit(length);
+                try {
+                    var entry = new RaftLog.LogEntry(body.getLong(), MessageCodec.readEntry(body));
+                    require(!body.hasRemaining() && entry.index() == entries.size() + 1L && entry.term() >= lastTerm,
+                            "Secuencia o longitud inválida");
+                    entries.add(entry);
+                    offsets.add(start);
+                    lastTerm = entry.term();
+                } catch (IllegalArgumentException | BufferUnderflowException invalid) {
+                    throw new IOException("Registro inválido en offset " + start, invalid);
+                }
+            }
+            return entries;
+        }
+
+        void append(RaftLog.LogEntry entry) throws IOException {
+            replaceAfter(offsets.size(), List.of(entry));
+        }
+
+        void replaceAfter(int keep, List<RaftLog.LogEntry> replacement) throws IOException {
+            if (failed || !channel.isOpen()) throw new IOException("Log Raft cerrado o requiere recuperación");
+            try {
+                if (keep < offsets.size()) {
+                    // Tras una caída, un prefijo más corto es válido y el líder reenviará el resto.
+                    truncateTail(offsets.get(keep));
+                    offsets.subList(keep, offsets.size()).clear();
+                }
+                for (RaftLog.LogEntry entry : replacement) {
+                    long start = channel.position();
+                    writeRecord(entry);
+                    offsets.add(start);
+                }
+                channel.force(true);
+            } catch (IOException failure) {
+                failed = true;
+                throw failure;
+            }
+        }
+
+        private void writeRecord(RaftLog.LogEntry entry) throws IOException {
+            int length = Long.BYTES + MessageCodec.entrySize(entry.entry());
+            ByteBuffer record = ByteBuffer.allocate(HEADER_SIZE + length + Integer.BYTES);
+            record.putInt(MAGIC).putInt(length).putInt(~length).putLong(entry.index());
+            MessageCodec.putEntry(record, entry.entry());
+            record.putInt(checksum(record.array(), HEADER_SIZE, length)).flip();
+            while (record.hasRemaining()) channel.write(record);
+        }
+
+        private ByteBuffer readFully(ByteBuffer target) throws IOException {
+            while (target.hasRemaining()) {
+                if (channel.read(target) < 0) throw new EOFException("El log cambió durante la recuperación");
+            }
+            return target.flip();
+        }
+
+        private void truncateTail(long offset) throws IOException {
+            channel.truncate(offset);
+            channel.position(offset);
+            channel.force(true);
+        }
+
+        private static int checksum(byte[] bytes, int offset, int length) {
+            var crc = new CRC32C();
+            crc.update(bytes, offset, length);
+            return (int) crc.getValue();
+        }
+
+        @Override public void close() throws IOException {
+            if (closed) return;
+            closed = true;
+            try {
+                channel.close();
+            } finally {
+                try {
+                    lockChannel.close();
+                } finally {
+                    releaseDirectory();
+                }
+            }
+        }
+    }
+
+    private static void syncDirectory(Path directory) throws IOException {
+        try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
+            parent.force(true);
+        }
+    }
+
     public enum RaftRole { FOLLOWER, CANDIDATE, LEADER }
 
     /** Gestionado bajo el monitor de RaftNode. Cada reinicio sortea un plazo nuevo. */
@@ -489,24 +827,44 @@ public final class NodeMain {
     }
 
     public static final class RaftNode implements RpcHandler, AutoCloseable {
-        private static final LogPosition ORIGIN = new LogPosition(0, 0);
         private static final long HEARTBEAT_INTERVAL = TimeUnit.MILLISECONDS.toNanos(125);
+        private static final long CLIENT_WAIT = TimeUnit.MILLISECONDS.toNanos(750);
+        private static final int MAX_CLIENT_WAITERS = 8;
         private final String id;
         private final Map<String, InetSocketAddress> peers;
         private final int majority;
         private final TermStore store;
+        private final RaftLog raftLog;
         private final ElectionTimer electionTimer = new ElectionTimer();
         private final ScheduledExecutorService clock = Executors.newSingleThreadScheduledExecutor();
         private final ExecutorService outbound;
         private final TcpClient client = new TcpClient();
         private final Set<String> votes = new HashSet<>();
         private final Set<String> inFlight = new HashSet<>();
+        private final Map<String, PeerProgress> progress = new HashMap<>();
+        private final Map<ClientKey, Long> appliedCommands = new LinkedHashMap<>();
+        private final Map<Long, Long> proposedAt = new HashMap<>();
+        private final Map<Long, Long> consensusNanos = new HashMap<>();
         private TermState state;
         private RaftRole role = RaftRole.FOLLOWER;
         private String leader;
         private long nextHeartbeat;
+        private long lastApplied;
+        private int clientWaiters;
         private boolean started;
         private boolean stopped;
+
+        private record PeerProgress(long nextIndex, long matchIndex) {}
+        private record ClientKey(String clientId, UUID requestId) {}
+
+        public record Snapshot(RaftRole role, long term, String leader, long commitIndex, long lastApplied,
+                               List<RaftLog.LogEntry> log, List<Long> appliedCommandIndexes,
+                               Map<Long, Long> consensusNanos) {}
+
+        public synchronized Snapshot snapshot() {
+            return new Snapshot(role, state.term(), leader, state.commitIndex(), lastApplied, raftLog.snapshot(),
+                    List.copyOf(appliedCommands.values()), Map.copyOf(consensusNanos));
+        }
 
         public RaftNode(String id, Set<String> members, Map<String, InetSocketAddress> peers, Path dataDir)
                 throws IOException {
@@ -522,7 +880,27 @@ public final class NodeMain {
             majority = members.size() / 2 + 1;
             store = new TermStore(dataDir, id, Set.copyOf(members));
             state = store.initial;
+            try {
+                raftLog = new RaftLog(dataDir);
+                if (raftLog.lastLogTerm() > state.term() || state.commitIndex() > raftLog.lastLogIndex()) {
+                    var invalid = new IOException("El log y los metadatos Raft persistidos son incompatibles");
+                    try {
+                        raftLog.close();
+                    } catch (IOException closeFailure) {
+                        invalid.addSuppressed(closeFailure);
+                    }
+                    throw invalid;
+                }
+            } catch (IOException | RuntimeException failure) {
+                try {
+                    store.close();
+                } catch (IOException closeFailure) {
+                    failure.addSuppressed(closeFailure);
+                }
+                throw failure;
+            }
             outbound = Executors.newFixedThreadPool(Math.max(1, this.peers.size()));
+            applyCommitted(false);
         }
 
         public synchronized void start() {
@@ -538,12 +916,12 @@ public final class NodeMain {
             long now = System.nanoTime();
             try {
                 if (role == RaftRole.LEADER) {
-                    if (now - nextHeartbeat >= 0) broadcastHeartbeat(now);
+                    if (now - nextHeartbeat >= 0) replicateAll(now);
                 } else if (electionTimer.expired(now)) {
                     beginElection();
                 }
             } catch (IOException failure) {
-                // persist() ya detuvo Raft; el listener puede seguir atendiendo DM1.
+                // La escritura fallida ya detuvo Raft. El listener puede seguir atendiendo DM1.
             }
         }
 
@@ -552,7 +930,7 @@ public final class NodeMain {
                 failStop("término agotado");
                 return;
             }
-            persist(new TermState(state.term() + 1, id));
+            persist(new TermState(state.term() + 1, id, state.commitIndex()));
             votes.clear();
             votes.add(id);
             electionTimer.reset();
@@ -560,26 +938,37 @@ public final class NodeMain {
             if (votes.size() >= majority) {
                 becomeLeader();
             } else {
-                broadcast(new RequestVote(state.term(), ORIGIN), RaftRole.CANDIDATE);
+                var request = new RequestVote(state.term(), raftLog.lastPosition());
+                peers.keySet().forEach(peer -> submit(peer, request, RaftRole.CANDIDATE));
             }
         }
 
-        private void becomeLeader() {
+        private void becomeLeader() throws IOException {
+            long firstNew = raftLog.lastLogIndex() + 1;
+            propose(new NoOpEntry(state.term()));
+            progress.clear();
+            peers.keySet().forEach(peer -> progress.put(peer, new PeerProgress(firstNew, 0)));
             transition(RaftRole.LEADER, id, "majority");
-            broadcastHeartbeat(System.nanoTime());
+            tryCommit();
+            replicateAll(System.nanoTime());
         }
 
-        private void broadcastHeartbeat(long now) {
+        private void replicateAll(long now) {
             nextHeartbeat = now + HEARTBEAT_INTERVAL;
-            broadcast(new AppendEntries(state.term(), ORIGIN, 0, List.of()), RaftRole.LEADER);
+            peers.keySet().forEach(this::replicate);
         }
 
-        private void broadcast(Payload request, RaftRole expectedRole) {
+        private void replicate(String peer) {
+            if (inFlight.contains(peer)) return;
+            AppendEntries request = raftLog.batch(state.term(), progress.get(peer).nextIndex(), id,
+                    state.commitIndex());
+            submit(peer, request, RaftRole.LEADER);
+        }
+
+        private void submit(String peer, Payload request, RaftRole expectedRole) {
             long term = state.term();
-            for (var peer : peers.entrySet()) {
-                if (inFlight.add(peer.getKey())) {
-                    outbound.execute(() -> send(peer.getKey(), peer.getValue(), request, expectedRole, term));
-                }
+            if (inFlight.add(peer)) {
+                outbound.execute(() -> send(peer, peers.get(peer), request, expectedRole, term));
             }
         }
 
@@ -614,12 +1003,83 @@ public final class NodeMain {
             if (response instanceof VoteResponse vote) {
                 if (vote.term() > state.term()) observeHigherTerm(vote.term());
                 else if (vote.voteGranted() && votes.add(peer) && votes.size() >= majority) becomeLeader();
-            } else if (response instanceof AppendResponse heartbeat && heartbeat.term() > state.term()) {
-                observeHigherTerm(heartbeat.term());
+            } else if (response instanceof AppendResponse append) {
+                if (append.term() > state.term()) observeHigherTerm(append.term());
+                else updateProgress(peer, append);
             }
         }
 
-        /** El comparador está listo para recibir la posición persistida cuando se implemente el log. */
+        private void updateProgress(String peer, AppendResponse response) throws IOException {
+            PeerProgress prior = progress.get(peer);
+            PeerProgress updated;
+            if (response.success()) {
+                long matched = Math.max(prior.matchIndex(), response.matchIndex());
+                updated = new PeerProgress(matched + 1, matched);
+            } else {
+                long next = Math.max(prior.matchIndex() + 1, prior.nextIndex() - 1);
+                updated = new PeerProgress(next, prior.matchIndex());
+            }
+            if (updated.equals(prior)) return;
+            progress.put(peer, updated);
+            System.out.printf("[RAFT %s] peer=%s term=%d nextIndex=%d matchIndex=%d event=%s%n",
+                    id, peer, state.term(), updated.nextIndex(), updated.matchIndex(),
+                    response.success() ? "replicated" : "replication-retry");
+            if (response.success()) tryCommit();
+            if (!response.success() || updated.nextIndex() <= raftLog.lastLogIndex()) replicate(peer);
+        }
+
+        private RaftLog.LogEntry propose(LogEntry entry) throws IOException {
+            long start = System.nanoTime();
+            try {
+                RaftLog.LogEntry saved = raftLog.append(entry);
+                proposedAt.put(saved.index(), start);
+                return saved;
+            } catch (IOException failure) {
+                failStop(failure.toString());
+                throw failure;
+            }
+        }
+
+        private void tryCommit() throws IOException {
+            long[] matched = new long[peers.size() + 1];
+            matched[0] = raftLog.lastLogIndex();
+            int i = 1;
+            for (PeerProgress peer : progress.values()) matched[i++] = peer.matchIndex();
+            Arrays.sort(matched);
+            long quorumIndex = matched[matched.length - majority];
+            if (quorumIndex > state.commitIndex() && raftLog.entryAt(quorumIndex).term() == state.term()) {
+                advanceCommit(quorumIndex);
+            }
+        }
+
+        private void advanceCommit(long index) throws IOException {
+            if (index <= state.commitIndex()) return;
+            persist(new TermState(state.term(), state.votedFor(), index));
+            applyCommitted(true);
+            notifyAll();
+        }
+
+        private void applyCommitted(boolean live) {
+            long committedAt = System.nanoTime();
+            while (lastApplied < state.commitIndex()) {
+                RaftLog.LogEntry applied = raftLog.entryAt(++lastApplied);
+                boolean effect = false;
+                if (applied.entry() instanceof CommandEntry command) {
+                    var key = new ClientKey(command.clientId(), command.clientRequestId());
+                    effect = appliedCommands.putIfAbsent(key, applied.index()) == null;
+                }
+                Long start = proposedAt.remove(applied.index());
+                Long elapsed = start == null ? null : committedAt - start;
+                if (elapsed != null) consensusNanos.put(applied.index(), elapsed);
+                if (live) {
+                    System.out.printf("[RAFT %s] entryIndex=%d entryTerm=%d kind=%s commitIndex=%d lastApplied=%d "
+                                    + "effect=%b consensusNanos=%s event=applied%n",
+                            id, applied.index(), applied.term(), applied.type(), state.commitIndex(), lastApplied,
+                            effect, elapsed == null ? "-" : elapsed);
+                }
+            }
+        }
+
         static boolean upToDate(LogPosition candidate, LogPosition local) {
             return candidate.term() > local.term()
                     || (candidate.term() == local.term() && candidate.index() >= local.index());
@@ -631,9 +1091,9 @@ public final class NodeMain {
             String candidate = header.senderId();
             boolean granted = vote.term() == state.term()
                     && (state.votedFor() == null || state.votedFor().equals(candidate))
-                    && upToDate(vote.lastLog(), ORIGIN);
+                    && upToDate(vote.lastLog(), raftLog.lastPosition());
             if (granted) {
-                if (state.votedFor() == null) persist(new TermState(state.term(), candidate));
+                if (state.votedFor() == null) persist(new TermState(state.term(), candidate, state.commitIndex()));
                 electionTimer.reset();
             }
             return new VoteResponse(state.term(), granted);
@@ -646,39 +1106,82 @@ public final class NodeMain {
             if (append.term() < state.term() || (role == RaftRole.LEADER && !id.equals(header.senderId()))) {
                 return new AppendResponse(state.term(), false, 0);
             }
-            transition(RaftRole.FOLLOWER, header.senderId(), "heartbeat");
+            transition(RaftRole.FOLLOWER, header.senderId(), append.entries().isEmpty() ? "heartbeat" : "append");
             electionTimer.reset();
-            boolean supported = append.entries().isEmpty() && append.prevLog().equals(ORIGIN);
-            return new AppendResponse(state.term(), supported, 0);
+            try {
+                boolean matches = raftLog.merge(append, state.commitIndex());
+                if (matches) advanceCommit(Math.min(append.leaderCommit(), append.lastIndex()));
+                return new AppendResponse(state.term(), matches, matches ? append.lastIndex() : 0);
+            } catch (IOException failure) {
+                failStop(failure.toString());
+                throw failure;
+            }
         }
 
         @Override public synchronized ClientResult clientCommand(Header header, ClientCommand command)
                 throws IOException {
             ensureAvailable();
-            if (role == RaftRole.LEADER) return new ClientResult(2, 0, null);
-            return new ClientResult(1, 0, leader);
+            if (role != RaftRole.LEADER) return new ClientResult(1, 0, leader);
+            RaftLog.LogEntry prior = raftLog.findCommand(header.senderId(), header.requestId());
+            if (prior != null && !((CommandEntry) prior.entry()).command().equals(command)) {
+                return new ClientResult(3, 0, null);
+            }
+            if (prior == null) {
+                prior = propose(new CommandEntry(state.term(), header.senderId(), header.requestId(), command));
+                tryCommit();
+            }
+            if (prior.index() <= lastApplied) return new ClientResult(0, prior.index(), null);
+            peers.keySet().forEach(this::replicate);
+            return awaitCommit(prior.index(), state.term());
+        }
+
+        private ClientResult awaitCommit(long index, long term) throws IOException {
+            if (clientWaiters >= MAX_CLIENT_WAITERS) return new ClientResult(2, 0, null);
+            long deadline = System.nanoTime() + CLIENT_WAIT;
+            clientWaiters++;
+            try {
+                while (isCurrent(RaftRole.LEADER, term)) {
+                    if (index <= lastApplied) return new ClientResult(0, index, null);
+                    long remaining = deadline - System.nanoTime();
+                    if (remaining <= 0) break;
+                    TimeUnit.NANOSECONDS.timedWait(this, remaining);
+                }
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                throw new IOException("Espera de commit interrumpida", interrupted);
+            } finally {
+                clientWaiters--;
+            }
+            ensureAvailable();
+            if (role != RaftRole.LEADER) return new ClientResult(1, 0, leader);
+            return new ClientResult(2, 0, null);
         }
 
         private void observeHigherTerm(long term) throws IOException {
             boolean wasLeader = role == RaftRole.LEADER;
-            persist(new TermState(term, null));
+            persist(new TermState(term, null, state.commitIndex()));
             votes.clear();
             if (wasLeader) electionTimer.reset();
+            proposedAt.clear();
             role = RaftRole.FOLLOWER;
             leader = null;
             log("higher-term");
+            notifyAll();
         }
 
         private void transition(RaftRole next, String knownLeader, String reason) {
             boolean changed = next != role || !Objects.equals(knownLeader, leader);
+            if (role == RaftRole.LEADER && next != role) proposedAt.clear();
             role = next;
             leader = knownLeader;
             if (changed || next == RaftRole.CANDIDATE) log(reason);
+            if (changed) notifyAll();
         }
 
         private void log(String reason) {
-            System.out.printf("[RAFT %s] role=%s term=%d leader=%s event=%s%n",
-                    id, role, state.term(), leader == null ? "-" : leader, reason);
+            System.out.printf("[RAFT %s] role=%s term=%d leader=%s event=%s commitIndex=%d lastApplied=%d lastLogIndex=%d%n",
+                    id, role, state.term(), leader == null ? "-" : leader, reason,
+                    state.commitIndex(), lastApplied, raftLog.lastLogIndex());
         }
 
         private void persist(TermState next) throws IOException {
@@ -702,6 +1205,7 @@ public final class NodeMain {
 
         private void stopExecutors() {
             stopped = true;
+            notifyAll();
             clock.shutdownNow();
             outbound.shutdownNow();
         }
@@ -716,15 +1220,20 @@ public final class NodeMain {
 
         @Override public synchronized void close() throws IOException {
             stopExecutors();
-            store.close();
+            try {
+                raftLog.close();
+            } finally {
+                store.close();
+            }
         }
     }
 
-    private record TermState(long term, String votedFor) {}
+    private record TermState(long term, String votedFor, long commitIndex) {}
 
     /** Formato local. Se bloquea el directorio durante toda la ejecución del nodo. */
     private static final class TermStore implements AutoCloseable {
-        private static final int FORMAT = 0x44525331; // DRS1
+        private static final int LEGACY_FORMAT = 0x44525331; // DRS1
+        private static final int FORMAT = 0x44525332; // DRS2
         private final Path directory;
         private final Path file;
         private final FileChannel lockChannel;
@@ -761,21 +1270,24 @@ public final class NodeMain {
             try {
                 opened = new DataInputStream(Files.newInputStream(file));
             } catch (NoSuchFileException missing) {
-                TermState fresh = new TermState(0, null);
+                TermState fresh = new TermState(0, null, 0);
                 save(fresh);
                 return fresh;
             }
             try (DataInputStream input = opened) {
-                if (input.readInt() != FORMAT || !input.readUTF().equals(nodeId)
+                int format = input.readInt();
+                if ((format != FORMAT && format != LEGACY_FORMAT) || !input.readUTF().equals(nodeId)
                         || !input.readUTF().equals(membership)) {
                     throw new IOException("Estado Raft incompatible con la identidad o membresía local");
                 }
                 long term = input.readLong();
                 String vote = input.readUTF();
-                if (term < 0 || (!vote.isEmpty() && (term == 0 || !members.contains(vote))) || input.read() != -1) {
+                long commitIndex = format == FORMAT ? input.readLong() : 0;
+                if (term < 0 || commitIndex < 0 || (term == 0 && commitIndex != 0)
+                        || (!vote.isEmpty() && (term == 0 || !members.contains(vote))) || input.read() != -1) {
                     throw new IOException("Estado Raft inválido");
                 }
-                return new TermState(term, vote.isEmpty() ? null : vote);
+                return new TermState(term, vote.isEmpty() ? null : vote, commitIndex);
             }
         }
 
@@ -789,13 +1301,12 @@ public final class NodeMain {
                     output.writeUTF(membership);
                     output.writeLong(state.term());
                     output.writeUTF(state.votedFor() == null ? "" : state.votedFor());
+                    output.writeLong(state.commitIndex());
                     output.flush();
                     channel.force(true);
                 }
                 Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
-                    parent.force(true);
-                }
+                syncDirectory(directory);
             } finally {
                 Files.deleteIfExists(temporary);
             }
