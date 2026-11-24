@@ -6,6 +6,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Permiso para usar la cámara (necesario para el QR) -->
+    <uses-permission android:name="android.permission.CAMERA" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -28,6 +31,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Nueva actividad para escanear el código QR -->
+        <activity
+            android:name=".EscanerQrActivity"
+            android:exported="false"
+            android:theme="@style/Theme.DogMessengerApp" />
+
     </application>
 
 </manifest>
