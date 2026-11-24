@@ -79,6 +79,22 @@ class RaftNode(val myId: String, val puerto: Int, val otrosNodos: List<Pair<Stri
                     // TODO: Leer entryCount y las entradas
                     manejarAppendEntries(header.senderId, term, prevLogIndex, prevLogTerm, leaderCommit)
                 }
+                
+                // =========================================================
+                // NUEVO CASO: Recibir mensaje desde la App Android (0x03)
+                // =========================================================
+                0x03 -> {
+                    val commandLen = input.readInt()
+                    val commandBytes = ByteArray(commandLen)
+                    input.readFully(commandBytes)
+                    val mensajeTexto = String(commandBytes, Charsets.UTF_8)
+                    
+                    println("[$myId] ¡Mensaje recibido de la App Android!: $mensajeTexto")
+                    
+                    // TODO: Si este nodo es el LÍDER, debería agregar este mensaje a su log
+                    // y enviarlo a los demás nodos por AppendEntries para replicarlo.
+                    // Por ahora, solo lo mostramos en consola para confirmar la conexión.
+                }
             }
         } catch (e: Exception) {
             println("[$myId] Error procesando mensaje DM2: ${e.message}")
