@@ -6,7 +6,7 @@
 |---|---|---|---|
 | 3 nodos en computadoras distintas LAN/WiFi | PARCIAL: ejecutables; LAN por comprobar | Video 3 equipos + puertos/IP + pruebas de comunicación | — |
 | LP1, LP2, LP3, solo SDK y sockets/hilos | PARCIAL: Java, Python, Kotlin TCP | Código comentado y build de tres nodos | — |
-| Raft desde cero | PARCIAL: elección, replicación, compromiso y recuperación en Java y loopback | Integración entre lenguajes y pruebas LAN | — |
+| Raft desde cero | PARCIAL: Java (LP1) y Python (LP2) desde cero, interoperables en DM2 binario; clúster mixto n1 Java + n2/n3 Python en loopback con líder Java y con líder Python (`tools/mixed_cluster_test.py`, 5/5 corridas PASS). Kotlin (LP3) pendiente | Kotlin en el clúster y pruebas LAN | fase I |
 | Segundo algoritmo asignado desde cero | PENDIENTE | Implementación en 3 nodos + comparación con Raft | — |
 | Comunicación cliente desktop/móvil | PENDIENTE | Mensajes en ambos sentidos | — |
 | Versión web (objetivo general) | POR DEFINIR | Confirmar alcance con docente | — |
@@ -14,9 +14,9 @@
 | Imágenes y archivos | PENDIENTE | Hash de integridad + recuperación de contenido | — |
 | Clonación mediante QR | PENDIENTE | Sincronización de historial anterior y autorización | — |
 | Cifrado de extremo a extremo | PENDIENTE | Prueba cliente-cliente y servidor sin texto legible | — |
-| Fallo del líder / nueva elección | PARCIAL: prueba automática con tres procesos Java en loopback | Logs con término/líder y demo en vivo | — |
-| Caída de seguidor / recuperación | PENDIENTE | Igualdad de índices/entradas comprometidas | — |
-| Partición de red | PENDIENTE | Mayoría/minoría y explicación | — |
+| Fallo del líder / nueva elección | PARCIAL: pruebas automáticas en loopback con 3 procesos Java, con 3 Python (`fault_simulator.py`) y mixtas Java+Python (`mixed_cluster_test.py`, paso 4) | Logs con término/líder y demo en vivo en LAN | fase I |
+| Caída de seguidor / recuperación | PARCIAL: nodo revivido se pone al día y `--inspect` de Java y Python muestra entradas comprometidas idénticas (índice, término, tipo, clientId, clientRequestId, command) en loopback | Repetir en LAN | fase I |
+| Partición de red | PARCIAL: líder Python aislado (`fault.json`), la mayoría reelige y confirma; al sanar el aislado se sincroniza (`fault_simulator.py`, escenarios 2-3) | Partición real en LAN con Java y explicación mayoría/minoría | fase I |
 | Métricas de latencia y throughput | PENDIENTE | CSV, método de medición y comparación | — |
 | Reportes automáticos | PENDIENTE | Script que produzca archivo y gráfico sin inventar datos | — |
 | Arquitectura y diagramas de protocolo | PARCIAL: [diseño DM2 propuesto](../protocol/CONTRATO_TCP_v2.md) y [diagramas Raft](../protocol/diagramas-raft.md) | Validar los intercambios Raft implementados y documentar el segundo algoritmo | — |
@@ -123,3 +123,35 @@ de los 3 nodos.
 | Sin bloqueo exclusivo del directorio de datos | `storage.py` | Dos procesos con el mismo `--data-dir` se pisarían (Java sí lo bloquea) |
 | `tools/benchmark_and_report.py` sigue en el protocolo JSON anterior y usa `matplotlib` (dependencia externa) | herramienta | No ejecutable hasta migrarlo (fase VIII) |
 | `secondary_engine.py` (2PC) sigue importando `protocol_dm2` y tiene los bugs listados en CLAUDE.md | 2PC | Fase III |
+
+## Clúster mixto Java + Python — fase I (sub-paso I.4)
+
+```bash
+python3 tools/mixed_cluster_test.py     # Windows: py -3 tools\mixed_cluster_test.py
+```
+
+n1 Java + n2 Python + n3 Python en `127.0.0.1:19101-19103` con `--data-dir` temporales. Dos
+rondas, una con líder inicial Java y otra con líder inicial Python. El lenguaje del líder se
+fuerza arrancando primero ese nodo para que llegue con un término mayor. En cada ronda:
+elección; 20 `CLIENT_COMMAND` concurrentes que siguen `NOT_LEADER`; avance de `commitIndex` en
+los seguidores del otro lenguaje; muerte del líder, reelección y 10 comandos más; reinicio del
+nodo caído y comparación por `--inspect` de Java y de Python de todas las entradas comprometidas.
+Al final se revisan los logs de los nodos.
+
+Resultado real: 5 corridas seguidas, **PASS 14/14** en cada una. En la ronda con líder Java, los
+seguidores Python aceptaron lotes de hasta 3 entradas (según el `matchIndex` registrado por Java)
+y avanzaron su `commitIndex`. En la ronda con líder Python, el seguidor Java aceptó sus
+AppendEntries hasta `commitIndex` 20 y, tras revivir, se puso al día (paso 5 de la ronda Java).
+Los logs de los nodos no tienen Traceback, `ERROR`, `rpc-discarded` (respuestas descartadas por
+el motor Python) ni `rpc-error`.
+
+Para comparar también los bytes del comando, `--inspect` agrega `command=<hex>` en Java y Python.
+Es un cambio aditivo de la CLI que no toca la lógica Raft.
+
+### Observaciones del clúster mixto para la fase II
+
+| Observación | Evidencia | Relación |
+|---|---|---|
+| El líder Python no agrega NO_OP | Ronda con líder Python: 30 entradas comprometidas, 0 NO_OP (Java agrega 1) | Bug NO_OP ya listado |
+| Plazos de elección distintos: Python 350–700 ms, Java 500–900 ms | En las 10 reelecciones medidas ganó siempre un nodo Python | Igualar los plazos con Java para no sesgar las elecciones |
+| Java no registra las respuestas DM2 que descarta | `TcpClient.call` lanza `IOException` sin log | La revisión de logs solo cubre los descartes del lado Python |
