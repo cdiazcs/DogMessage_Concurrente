@@ -171,8 +171,8 @@ class StorageTest(unittest.TestCase):
             self.assertEqual(raft_engine.inspect(self.dir, "n2"), 0)
         self.assertEqual(out.getvalue().splitlines(), [
             "role=FOLLOWER term=4 leader=null commitIndex=1 lastApplied=1 lastLogIndex=2 appliedCommands=[]",
-            "index=1 term=4 type=NO_OP status=COMMITTED client=null requestId=null",
-            "index=2 term=4 type=COMMAND status=PENDING client=c1 requestId=fedcba98-7654-3210-fedc-ba9876543210",
+            "index=1 term=4 type=NO_OP status=COMMITTED client=null requestId=null command=-",
+            "index=2 term=4 type=COMMAND status=PENDING client=c1 requestId=fedcba98-7654-3210-fedc-ba9876543210 command=00",
         ])
 
 

@@ -555,5 +555,7 @@ def inspect(data_dir: Path, node_id: str) -> int:
         status = "COMMITTED" if index <= state.commit_index else "PENDING"
         client = entry.client_id if entry.kind == dm2.COMMAND else "null"
         request = str(uuid.UUID(bytes=entry.client_request_id)) if entry.kind == dm2.COMMAND else "null"
-        print(f"index={index} term={entry.term} type={kind} status={status} client={client} requestId={request}")
+        command = entry.command.hex() if entry.kind == dm2.COMMAND else "-"
+        print(f"index={index} term={entry.term} type={kind} status={status} client={client} requestId={request} "
+              f"command={command}")
     return 0

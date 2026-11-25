@@ -27,6 +27,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -121,10 +122,11 @@ public final class NodeMain {
                 snapshot.role(), snapshot.term(), snapshot.leader(), snapshot.commitIndex(), snapshot.lastApplied(),
                 snapshot.log().size(), snapshot.appliedCommandIndexes());
         for (RaftLog.LogEntry entry : snapshot.log()) {
-            System.out.printf("index=%d term=%d type=%s status=%s client=%s requestId=%s%n",
+            System.out.printf("index=%d term=%d type=%s status=%s client=%s requestId=%s command=%s%n",
                     entry.index(), entry.term(), entry.type(),
                     entry.index() <= snapshot.commitIndex() ? "COMMITTED" : "PENDING",
-                    entry.clientId(), entry.requestId());
+                    entry.clientId(), entry.requestId(),
+                    entry.type() == RaftLog.EntryType.COMMAND ? HexFormat.of().formatHex(entry.payload()) : "-");
         }
     }
 
