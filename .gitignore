@@ -13,9 +13,6 @@
 clients/android/DogMessengerApp/build/
 clients/android/DogMessengerApp/.gradle/
 clients/android/DogMessengerApp/local.properties
-# Locales del equipo / asistente
-CLAUDE.md
-.gitattributes
 
 # Datos de ejecución y artefactos
 data*/
