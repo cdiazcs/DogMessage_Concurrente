@@ -1,185 +1,110 @@
-"""Simulador de fallos, particiones de red y recuperación de log (Integrante 2)."""
+"""Simulador de fallos, particiones de red y recuperación de log (Integrante 2), sobre DM2 binario.
+
+Escenarios originales conservados con 3 nodos Python:
+  1. Clúster Raft y 5 comandos comprometidos.
+  2. Partición del líder (aislamiento por <data-dir>/fault.json), reelección y 5 comandos.
+  3. Sanar la partición: el antiguo líder sincroniza las 10 entradas.
+  4. Caída abrupta (kill) del nuevo líder, reelección, reinicio desde disco y logs idénticos.
+
+Uso:  Ubuntu: python3 tools/fault_simulator.py      Windows: py -3 tools\\fault_simulator.py
+"""
 from __future__ import annotations
 
-import shutil
-import socket
-import subprocess
+import argparse
 import sys
+import tempfile
 import time
-import uuid
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
 
-ROOT = Path(__file__).resolve().parents[1]
-NODE_SCRIPT = ROOT / "nodes" / "python" / "node.py"
-sys.path.insert(0, str(ROOT / "nodes" / "python"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from cluster_lib import Cluster, Report, StepFailed, committed_entries  # noqa: E402
 
-from node import encode_frame, recv_frame
-from protocol_dm2 import build_dm2, parse_dm2
-
-CLUSTER = {
-    "n1": ("127.0.0.1", 9201),
-    "n2": ("127.0.0.1", 9202),
-    "n3": ("127.0.0.1", 9203),
-}
+PORTS = {"n1": 9201, "n2": 9202, "n3": 9203}
 
 
-def query_node(addr: Tuple[str, int], msg_type: str, payload: Dict[str, Any], timeout: float = 2.0) -> Optional[Dict[str, Any]]:
+def run_fault_suite(workdir: Path) -> int:
+    cluster = Cluster([(nid, "python", port) for nid, port in PORTS.items()], workdir)
+    report = Report()
+    sent = 0
+    state = {}
+
+    def send(count: int, label: str) -> str:
+        nonlocal sent
+        last = 0
+        for _ in range(count):
+            sent += 1
+            last, _leader = cluster.send_command(f"{label}-{sent}".encode())
+        return f"{count} comandos COMMITTED, último índice {last}"
+
+    def step1():
+        for current in cluster.nodes.values():
+            current.start()
+        leader = cluster.find_leader(10)
+        if leader is None:
+            raise StepFailed("No se eligió líder inicial")
+        state["leader1"] = leader
+        return f"líder {leader.node_id} término {leader.state()['term']}; " + send(5, "msg-inicial")
+
+    def step2():
+        leader1 = state["leader1"]
+        start = time.perf_counter()
+        leader1.set_isolated(True)
+        leader2 = cluster.find_leader(10, exclude=[leader1.node_id])
+        if leader2 is None:
+            raise StepFailed("El clúster no eligió nuevo líder tras aislar al anterior")
+        state["leader2"] = leader2
+        failover = (time.perf_counter() - start) * 1000
+        return (f"{leader1.node_id} aislado; nuevo líder {leader2.node_id} en {failover:.0f} ms; "
+                + send(5, "msg-durante-particion"))
+
+    def step3():
+        leader1, leader2 = state["leader1"], state["leader2"]
+        start = time.perf_counter()
+        leader1.set_isolated(False)
+        cluster.wait_commit([leader1], int(leader2.state()["commit"]), timeout=10)
+        return f"{leader1.node_id} sincronizó commitIndex {leader1.state()['commit']} en " \
+               f"{(time.perf_counter() - start) * 1000:.0f} ms"
+
+    def step4():
+        leader2 = state["leader2"]
+        leader2.kill()
+        leader3 = cluster.find_leader(10, exclude=[leader2.node_id])
+        if leader3 is None:
+            raise StepFailed("No hubo reelección tras la caída del proceso")
+        before = int(leader3.state()["commit"])
+        recovered = leader2.inspect()  # El nodo Python permite inspeccionar sin bloquear el directorio.
+        if len(committed_entries(recovered)) < 10:
+            raise StepFailed(f"{leader2.node_id} perdió entradas comprometidas en disco")
+        leader2.start()
+        detail = send(2, "msg-tras-reinicio")
+        target = max(before, int(leader3.state()["commit"]))
+        cluster.wait_commit(cluster.nodes.values(), target, timeout=10)
+        cluster.stop_all()
+        logs = {nid: committed_entries(n.inspect()) for nid, n in cluster.nodes.items()}
+        reference = logs[leader3.node_id]
+        if len(reference) < 12 or any(entries != reference for entries in logs.values()):
+            raise StepFailed(f"Logs comprometidos distintos: { {k: len(v) for k, v in logs.items()} }")
+        return (f"{leader2.node_id} caído y reiniciado; nuevo líder {leader3.node_id}; {detail}; "
+                f"{len(reference)} entradas comprometidas idénticas en los 3 nodos")
+
     try:
-        with socket.create_connection(addr, timeout=timeout) as conn:
-            conn.settimeout(timeout)
-            conn.sendall(encode_frame(build_dm2(msg_type, "fault-sim", payload)))
-            return parse_dm2(recv_frame(conn))
-    except OSError:
-        return None
-
-
-def wait_for_leader(timeout: float = 5.0) -> Optional[str]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        leaders = set()
-        for nid, addr in CLUSTER.items():
-            resp = query_node(addr, "NODE_STATUS", {}, timeout=0.4)
-            if resp:
-                m = resp["payload"]["metrics"]
-                if not m.get("isolated") and m.get("state") == "LEADER":
-                    leaders.add(nid)
-        if len(leaders) == 1:
-            return next(iter(leaders))
-        time.sleep(0.1)
-    return None
-
-
-def run_fault_suite() -> int:
-    test_data = ROOT / "data_fault_test"
-    if test_data.exists():
-        shutil.rmtree(test_data)
-
-    peers_arg = ",".join(f"{nid}={h}:{p}" for nid, (h, p) in CLUSTER.items())
-    procs: Dict[str, subprocess.Popen] = {}
-
-    try:
-        print("=== 1. Levantando clúster de 3 nodos (Raft) ===")
-        for nid, (host, port) in CLUSTER.items():
-            procs[nid] = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(NODE_SCRIPT),
-                    "--id",
-                    nid,
-                    "--host",
-                    host,
-                    "--port",
-                    str(port),
-                    "--peers",
-                    peers_arg,
-                    "--algo",
-                    "raft",
-                    "--data-dir",
-                    str(test_data),
-                ],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-
-        leader1 = wait_for_leader(6.0)
-        assert leader1 is not None, "No se eligió líder inicial"
-        print(f"[OK] Líder inicial elegido: {leader1}")
-
-        # Enviar 5 mensajes iniciales
-        for i in range(1, 6):
-            res = query_node(
-                CLUSTER[leader1],
-                "CLIENT_COMMAND",
-                {"command": f"msg-inicial-{i}", "requestId": uuid.uuid4().hex},
-            )
-            assert res and res["payload"].get("committed"), f"Fallo al comprometer msg {i}"
-        print("[OK] 5 mensajes iniciales replicados y comprometidos")
-
-        print(f"\n=== 2. Simulando partición de red del líder ({leader1}) ===")
-        t_part = time.perf_counter()
-        query_node(CLUSTER[leader1], "FAULT_CONTROL", {"isolated": True})
-
-        leader2 = None
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            cand = wait_for_leader(0.5)
-            if cand and cand != leader1:
-                leader2 = cand
-                break
-        failover_ms = (time.perf_counter() - t_part) * 1000
-        assert leader2 is not None, "El clúster no eligió nuevo líder tras aislar al anterior"
-        print(f"[OK] Nuevo líder elegido tras partición: {leader2} en {failover_ms:.2f} ms")
-
-        # Enviar 5 mensajes mientras el antiguo líder está aislado
-        for i in range(6, 11):
-            res = query_node(
-                CLUSTER[leader2],
-                "CLIENT_COMMAND",
-                {"command": f"msg-durante-particion-{i}", "requestId": uuid.uuid4().hex},
-            )
-            assert res and res["payload"].get("committed"), f"Fallo en msg {i} bajo partición"
-        print("[OK] 5 mensajes comprometidos por mayoría con 1 nodo aislado")
-
-        print(f"\n=== 3. Sanando partición y verificando sincronización de {leader1} ===")
-        t_heal = time.perf_counter()
-        query_node(CLUSTER[leader1], "FAULT_CONTROL", {"isolated": False})
-
-        synced = False
-        while time.monotonic() - t_heal < 4.0:
-            st = query_node(CLUSTER[leader1], "NODE_STATUS", {})
-            if st and st["payload"]["metrics"]["commitIndex"] == 10:
-                synced = True
-                break
-            time.sleep(0.1)
-        recovery_ms = (time.perf_counter() - t_heal) * 1000
-        assert synced, f"{leader1} no sincronizó las 10 entradas del log"
-        print(f"[OK] Nodo {leader1} sincronizó las 10 entradas en {recovery_ms:.2f} ms")
-
-        print(f"\n=== 4. Simulando caída abrupta (SIGKILL) y recuperación desde disco de {leader2} ===")
-        procs[leader2].kill()
-        procs[leader2].wait()
-
-        leader3 = wait_for_leader(5.0)
-        assert leader3 is not None and leader3 != leader2, "No hubo reelección tras caída del proceso"
-        print(f"[OK] Nuevo líder tras caída abrupta: {leader3}")
-
-        # Reiniciar nodo caído desde su persistencia en disco
-        host, port = CLUSTER[leader2]
-        procs[leader2] = subprocess.Popen(
-            [
-                sys.executable,
-                str(NODE_SCRIPT),
-                "--id",
-                leader2,
-                "--host",
-                host,
-                "--port",
-                str(port),
-                "--peers",
-                peers_arg,
-                "--algo",
-                "raft",
-                "--data-dir",
-                str(test_data),
-            ],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        time.sleep(0.8)
-        st_recovered = query_node(CLUSTER[leader2], "NODE_STATUS", {})
-        assert st_recovered and st_recovered["payload"]["metrics"]["logLength"] == 10
-        print(f"[OK] Nodo {leader2} reiniciado y log de 10 entradas intacto en disco")
-
-        print("\nPASS: Todas las pruebas de fallos, partición y recuperación superadas.")
-        return 0
+        report.step("1. Clúster de 3 nodos Python y 5 mensajes iniciales", step1)
+        report.step("2. Partición del líder y reelección", step2)
+        report.step("3. Sanar partición y sincronizar", step3)
+        report.step("4. Caída abrupta, recuperación desde disco y logs idénticos", step4)
+    except Exception:  # noqa: BLE001 - el detalle ya se imprimió
+        pass
     finally:
-        for p in procs.values():
-            if p.poll() is None:
-                p.kill()
-        if test_data.exists():
-            shutil.rmtree(test_data, ignore_errors=True)
+        cluster.stop_all()
+    verdict = "PASS" if report.failed == 0 and report.passed == 4 else "FAIL"
+    print(f"\n{verdict}: {report.passed}/4 escenarios de fallo. Logs en {workdir}")
+    return 0 if verdict == "PASS" else 1
 
 
 if __name__ == "__main__":
-    sys.exit(run_fault_suite())
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--workdir", type=Path, help="Directorio para datos y logs (por defecto, uno temporal)")
+    args = parser.parse_args()
+    workdir = args.workdir or Path(tempfile.mkdtemp(prefix="dm-fault-"))
+    workdir.mkdir(parents=True, exist_ok=True)
+    sys.exit(run_fault_suite(workdir))
