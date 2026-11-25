@@ -1,9 +1,12 @@
 """Motor Raft Python sobre DM2 binario: reglas del contrato que afectan la interoperabilidad."""
 import contextlib
 import io
+import json
 import shutil
 import sys
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -171,6 +174,87 @@ class StorageTest(unittest.TestCase):
             "index=1 term=4 type=NO_OP status=COMMITTED client=null requestId=null",
             "index=2 term=4 type=COMMAND status=PENDING client=c1 requestId=fedcba98-7654-3210-fedc-ba9876543210",
         ])
+
+
+class RecordingClient:
+    """Concede votos y acepta lotes; registra cada RPC saliente. Puede retener respuestas."""
+
+    def __init__(self):
+        self.calls = []
+        self.release = None  # threading.Event opcional para retener la respuesta
+
+    def call_rpc(self, endpoint, expected_peer, sender_id, payload):
+        self.calls.append((expected_peer, type(payload).__name__))
+        if self.release is not None:
+            self.release.wait(5)
+        if isinstance(payload, dm2.RequestVote):
+            response = dm2.VoteResponse(payload.term, True)
+        else:
+            response = dm2.AppendResponse(payload.term, True, payload.last_index)
+        return dm2.Message(dm2.Header(dm2.RAFT, response.TYPE, node.new_request_id(), expected_peer), response)
+
+
+class IsolationTest(unittest.TestCase):
+    """Partición simétrica por <data-dir>/fault.json: ni responde ni envía ni procesa respuestas."""
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="raft-iso-"))
+        self.addCleanup(shutil.rmtree, self.dir, True)
+        self.client = RecordingClient()
+        self.out = io.StringIO()
+        with contextlib.redirect_stdout(self.out):
+            self.engine = raft_engine.RaftEngine("n2", PEERS, self.dir, self.client)
+        self.addCleanup(self.engine.stop)
+
+    def isolate(self, value):
+        (self.dir / raft_engine.FAULT_FILE).write_text(json.dumps({"isolated": value}), encoding="utf-8")
+        deadline = time.monotonic() + 2
+        while self.engine.isolated != value and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(self.engine.isolated, value)
+
+    def wait_for(self, condition, limit=3.0):
+        deadline = time.monotonic() + limit
+        while not condition() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        return condition()
+
+    def test_isolated_follower_neither_answers_nor_campaigns(self):
+        with contextlib.redirect_stdout(self.out):
+            self.engine.start()
+            self.isolate(True)
+            time.sleep(1.2)  # > plazo máximo de elección (0,70 s)
+            vote = self.engine.request_vote(header("n1", dm2.REQUEST_VOTE), dm2.RequestVote(9, 0, 0))
+            append = self.engine.append_entries(header("n1", dm2.APPEND_ENTRIES), dm2.AppendEntries(9, 0, 0, 0))
+            result = self.engine.client_command(header("c1", dm2.CLIENT_COMMAND), dm2.ClientCommand(b"x"))
+        self.assertEqual((vote, append, result), (None, None, None), "no responde")
+        self.assertEqual(self.client.calls, [], "no envía RequestVote")
+        self.assertEqual((self.engine.state, self.engine.current_term), ("FOLLOWER", 0))
+
+    def test_isolated_leader_stops_sending_append_entries(self):
+        with contextlib.redirect_stdout(self.out):
+            self.engine.start()
+            self.assertTrue(self.wait_for(lambda: self.engine.state == "LEADER"))
+            self.assertTrue(self.wait_for(lambda: any(k == "AppendEntries" for _, k in self.client.calls)))
+            self.isolate(True)
+            time.sleep(0.2)  # deja terminar cualquier RPC ya en curso
+            self.client.calls.clear()
+            time.sleep(0.6)  # ~6 intervalos de heartbeat
+        self.assertEqual(self.client.calls, [], "no envía AppendEntries")
+        with contextlib.redirect_stdout(self.out):
+            self.isolate(False)
+            self.assertTrue(self.wait_for(lambda: any(k == "AppendEntries" for _, k in self.client.calls)),
+                            "al sanar vuelve a replicar")
+
+    def test_late_responses_are_ignored_while_isolated(self):
+        self.client.release = threading.Event()
+        with contextlib.redirect_stdout(self.out):
+            self.engine.start()
+            self.assertTrue(self.wait_for(lambda: len(self.client.calls) >= 2), "RequestVote en curso")
+            self.isolate(True)
+            self.client.release.set()  # llegan votos concedidos estando aislado
+            time.sleep(0.3)
+        self.assertNotEqual(self.engine.state, "LEADER", "no gana una elección con respuestas tardías")
 
 
 if __name__ == "__main__":

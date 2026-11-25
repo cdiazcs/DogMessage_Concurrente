@@ -243,6 +243,8 @@ class RaftEngine:
                 return
 
             with self.lock:
+                if self.isolated:
+                    return  # Partición simétrica: tampoco se procesan respuestas que lleguen tarde.
                 self._metrics["rpc_received"] += 1
                 if payload.term > self.current_term:
                     self._step_down(payload.term)
@@ -332,6 +334,8 @@ class RaftEngine:
             return
 
         with self.lock:
+            if self.isolated:
+                return  # Partición simétrica: tampoco se procesan respuestas que lleguen tarde.
             self._metrics["rpc_received"] += 1
             if payload.term > self.current_term:
                 self._step_down(payload.term)
