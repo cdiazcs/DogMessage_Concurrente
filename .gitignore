@@ -1,0 +1,24 @@
+# Binarios y compilados
+*.jar
+*.class
+/build/
+*.exe
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# Android
+clients/android/DogMessengerApp/build/
+clients/android/DogMessengerApp/.gradle/
+clients/android/DogMessengerApp/local.properties
+# Locales del equipo / asistente
+CLAUDE.md
+.gitattributes
+
+# Datos de ejecución y artefactos
+data*/
+build/raft-*/
+__pycache__/
+*.pyc
