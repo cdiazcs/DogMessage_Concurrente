@@ -273,9 +273,16 @@ class RaftEngine:
         """RPC fuera del lock. Devuelve el payload validado o None si el intento falló."""
         try:
             client = self.client.with_timeout(timeout) if hasattr(self.client, "with_timeout") else self.client
-            return client.call_rpc(addr, peer_id, self.node_id, request).payload
-        except (OSError, ValueError):
+            payload = client.call_rpc(addr, peer_id, self.node_id, request).payload
+        except (OSError, ValueError) as error:
+            if str(error).startswith("Respuesta descartada"):
+                # Fallo de contrato (correlación, término, matchIndex): visible en los logs.
+                print(f"[RAFT {self.node_id}] peer={peer_id} event=rpc-discarded reason={error}", flush=True)
             return None
+        if isinstance(payload, dm2.ErrorMsg):
+            print(f"[RAFT {self.node_id}] peer={peer_id} event=rpc-error code={payload.code}", flush=True)
+            return None
+        return payload
 
     def _become_leader(self, election_t0: float) -> None:
         if self.state == "LEADER":
