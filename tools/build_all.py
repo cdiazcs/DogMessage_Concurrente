@@ -22,7 +22,8 @@ def build_kotlin():
         raise RuntimeError("Falta kotlinc (compilador Kotlin)")
     out = ROOT / "build" / "kotlin"
     out.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["kotlinc", str(ROOT / "nodes/kotlin/src/NodeMain.kt"), "-include-runtime", "-d", str(out / "dog-messenger-kotlin.jar")], check=True)
+    sources = [str(path) for path in sorted((ROOT / "nodes/kotlin/src").glob("*.kt"))]
+    subprocess.run(["kotlinc", *sources, "-include-runtime", "-d", str(out / "dog-messenger-kotlin.jar")], check=True)
     print("OK Kotlin compilado")
 
 
