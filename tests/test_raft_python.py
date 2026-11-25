@@ -149,6 +149,11 @@ class StorageTest(unittest.TestCase):
         self.dir = Path(tempfile.mkdtemp(prefix="raft-st-"))
         self.addCleanup(shutil.rmtree, self.dir, True)
 
+    def test_stale_temporary_is_removed(self):
+        (self.dir / "raft_state-abc.tmp").write_text("{", encoding="utf-8")
+        NodeStorage(self.dir, "n2")
+        self.assertEqual(list(self.dir.glob("*.tmp")), [])
+
     def test_corrupt_state_is_not_silently_reset(self):
         (self.dir / "raft_state.json").write_text("{no es json", encoding="utf-8")
         with self.assertRaises(StorageError):

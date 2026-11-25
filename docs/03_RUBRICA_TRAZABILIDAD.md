@@ -154,4 +154,6 @@ Es un cambio aditivo de la CLI que no toca la lógica Raft.
 |---|---|---|
 | El líder Python no agrega NO_OP | Ronda con líder Python: 30 entradas comprometidas, 0 NO_OP (Java agrega 1) | Bug NO_OP ya listado |
 | Plazos de elección distintos: Python 350–700 ms, Java 500–900 ms | En las 10 reelecciones medidas ganó siempre un nodo Python | Igualar los plazos con Java para no sesgar las elecciones |
+| Sin verificar en Windows: `os.replace` puede fallar con `PermissionError` si otro proceso (antivirus, indexador o un `--inspect` simultáneo) tiene abierto `raft_state.json`; hoy eso detiene el nodo (fail-stop) | Toda la evidencia de la fase I se obtuvo en Ubuntu | Probar en n2 Windows antes de la demo LAN |
+| Los logs del motor Python se imprimen con el lock tomado (Java hace lo mismo): si nadie lee un `stdout` redirigido a un pipe, el nodo se bloquea | Revisión de cierre de la fase I | Redirigir siempre a archivo o consola (los scripts ya lo hacen) |
 | Java no registra las respuestas DM2 que descarta | `TcpClient.call` lanza `IOException` sin log | La revisión de logs solo cubre los descartes del lado Python |

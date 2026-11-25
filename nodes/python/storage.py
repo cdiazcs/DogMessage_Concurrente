@@ -54,6 +54,11 @@ class NodeStorage:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.node_id = node_id
         self.state_file = self.directory / STATE_FILE
+        for stale in self.directory.glob("raft_state-*.tmp"):
+            try:
+                stale.unlink()  # Temporal de una escritura interrumpida: nunca se publicó.
+            except OSError:
+                pass
 
     def load(self) -> PersistentState:
         if not self.state_file.exists():

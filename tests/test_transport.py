@@ -87,7 +87,10 @@ class ServerCase(unittest.TestCase):
                 conn.sendall(data)
             chunks = []
             while True:
-                part = conn.recv(4096)
+                try:
+                    part = conn.recv(4096)
+                except ConnectionResetError:  # Windows puede reportar el cierre como RST.
+                    part = b""
                 if not part:
                     return b"".join(chunks)
                 chunks.append(part)
@@ -194,7 +197,11 @@ class ServerTest(ServerCase):
         start = time.monotonic()
         with socket.create_connection(self.endpoint, timeout=5) as conn:
             conn.sendall(b"\x00\x00")  # prefijo incompleto
-            self.assertEqual(conn.recv(10), b"")
+            try:
+                closed = conn.recv(10)
+            except ConnectionResetError:  # Windows puede reportar el cierre como RST.
+                closed = b""
+            self.assertEqual(closed, b"")
         self.assertLess(time.monotonic() - start, self.timeout + 1.0)
 
     def test_connection_limit(self):
@@ -203,7 +210,11 @@ class ServerTest(ServerCase):
             time.sleep(0.2)
             with socket.create_connection(self.endpoint, timeout=5) as extra:
                 extra.settimeout(0.5)
-                self.assertEqual(extra.recv(10), b"", "la conexión excedente debe cerrarse")
+                try:
+                    closed = extra.recv(10)
+                except ConnectionResetError:  # Windows puede reportar el cierre como RST.
+                    closed = b""
+                self.assertEqual(closed, b"", "la conexión excedente debe cerrarse")
         finally:
             for conn in idle:
                 conn.close()
