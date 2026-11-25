@@ -259,7 +259,12 @@ class TcpClient:
     """Una conexión nueva por intento. El emisor esperado sale de la configuración del llamador."""
 
     def __init__(self, timeout: float = IO_TIMEOUT) -> None:
+        if not 0 < timeout <= IO_TIMEOUT:
+            raise ValueError("El plazo del cliente debe estar en (0, 5] s")
         self.timeout = timeout
+
+    def with_timeout(self, timeout: float) -> "TcpClient":
+        return TcpClient(timeout)
 
     def exchange(self, endpoint: Endpoint, body: bytes) -> bytes:
         try:
@@ -351,14 +356,27 @@ def main(argv: Optional[list] = None) -> int:
             members = set(args.members.split(","))
         else:
             members = set(peers) | {args.node_id}
+        if not all(ID_RE.fullmatch(m) for m in members) or args.node_id not in members:
+            raise ValueError("--members debe incluir --id y usar IDs válidos")
         if args.inspect and args.data_dir is None:
             raise ValueError("--inspect requiere --data-dir")
         if args.data_dir is None:
             if peers:
                 raise ValueError("--peer requiere --data-dir")
             return serve(args.node_id, args.host, args.port, members, RpcHandler())
-        raise ValueError("El motor Raft Python se conecta al codec DM2 en el sub-paso I.3")
-    except (OSError, ValueError) as error:
+        if set(peers) != members - {args.node_id}:
+            raise ValueError("Configura un --peer por cada otra réplica de --members")
+        if len(set(peers.values())) != len(peers):
+            raise ValueError("Los endpoints de los peers deben ser distintos")
+        import raft_engine  # Import diferido: raft_engine no depende de este módulo.
+        if args.inspect:
+            return raft_engine.inspect(args.data_dir, args.node_id)
+        engine = raft_engine.RaftEngine(args.node_id, peers, args.data_dir, TcpClient())
+        try:
+            return serve(args.node_id, args.host, args.port, members, engine, on_listen=engine.start)
+        finally:
+            engine.stop()
+    except Exception as error:  # noqa: BLE001 - incluye StorageError al recuperar
         print(f"ERROR {error}", file=sys.stderr)
         return 1
 
