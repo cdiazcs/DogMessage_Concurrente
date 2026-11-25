@@ -55,7 +55,7 @@ class RaftEngine:
         # Simulación de fallos (Integrante 2): se controla con <data-dir>/fault.json
         self.isolated: bool = False
         self.artificial_delay_ms: int = 0
-        self._fault_mtime: Optional[float] = None
+        self._fault_content: Optional[bytes] = None
 
         # Métricas
         self._metrics: Dict[str, Any] = {
@@ -118,14 +118,19 @@ class RaftEngine:
         t_elec.start()
         t_hb.start()
 
-    def stop(self) -> None:
+    def stop(self, join_timeout: float = 0.0) -> None:
         with self.lock:
             self._running = False
             self._stopped = True
             self._commit_cond.notify_all()
+        for thread in self._threads:
+            if join_timeout > 0 and thread is not threading.current_thread():
+                thread.join(join_timeout)
 
     def set_fault_state(self, isolated: Optional[bool] = None, delay_ms: Optional[int] = None) -> Dict[str, Any]:
         with self.lock:
+            if self._stopped:
+                return {"isolated": self.isolated, "delay_ms": self.artificial_delay_ms}
             if isolated is not None:
                 changed = self.isolated != bool(isolated)
                 self.isolated = bool(isolated)
@@ -141,18 +146,21 @@ class RaftEngine:
         """Lee <data-dir>/fault.json fuera del lock; solo aplica cambios cuando el archivo cambia."""
         path = self.data_dir / FAULT_FILE
         try:
-            mtime = path.stat().st_mtime
+            content: Optional[bytes] = path.read_bytes()
+        except FileNotFoundError:
+            content = None
         except OSError:
-            mtime = None
-        if mtime == self._fault_mtime:
             return
-        self._fault_mtime = mtime
+        # Se compara el contenido, no el mtime: en FAT/Windows dos escrituras seguidas comparten mtime.
+        if content == self._fault_content:
+            return
         config: Dict[str, Any] = {}
-        if mtime is not None:
+        if content is not None:
             try:
-                config = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return
+                config = json.loads(content.decode("utf-8"))
+            except ValueError:
+                return  # Escritura a medias: se reintenta en la próxima vuelta.
+        self._fault_content = content
         self.set_fault_state(isolated=bool(config.get("isolated", False)), delay_ms=int(config.get("delay_ms", 0)))
 
     def leader(self) -> Optional[str]:
@@ -183,6 +191,9 @@ class RaftEngine:
     def _election_loop(self) -> None:
         while True:
             time.sleep(0.03)
+            with self.lock:
+                if not self._running:
+                    return
             self._poll_fault_file()
             with self.lock:
                 if not self._running:

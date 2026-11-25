@@ -204,7 +204,7 @@ class IsolationTest(unittest.TestCase):
         self.out = io.StringIO()
         with contextlib.redirect_stdout(self.out):
             self.engine = raft_engine.RaftEngine("n2", PEERS, self.dir, self.client)
-        self.addCleanup(self.engine.stop)
+        self.addCleanup(self.engine.stop, 2.0)
 
     def isolate(self, value):
         (self.dir / raft_engine.FAULT_FILE).write_text(json.dumps({"isolated": value}), encoding="utf-8")
