@@ -13,3 +13,9 @@
 clients/android/DogMessengerApp/build/
 clients/android/DogMessengerApp/.gradle/
 clients/android/DogMessengerApp/local.properties
+
+# Datos de ejecución y artefactos
+data*/
+build/raft-*/
+__pycache__/
+*.pyc

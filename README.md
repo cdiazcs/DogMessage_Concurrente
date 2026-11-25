@@ -2,7 +2,8 @@
 
 > **Estado: starter funcional de conectividad, NO es el proyecto terminado.**
 > Los tres servidores en Java, Python y Kotlin comparten un protocolo TCP sin bibliotecas externas de comunicación.
-> **No están implementados aún:** Raft, el segundo algoritmo asignado, chat, QR, móvil, web, transferencia de archivos, cifrado E2EE, persistencia, comparaciones de rendimiento.
+> **Implementado:** Raft con persistencia en Java y en Python, interoperables en DM2 binario ([contrato](protocol/CONTRATO_TCP_v2.md)) y probados en un clúster mixto local.
+> **No están implementados aún:** Raft en Kotlin, el segundo algoritmo asignado, chat, QR, móvil, web, transferencia de archivos, cifrado E2EE, comparaciones de rendimiento.
 
 Este repositorio está preparado para que **3 integrantes** trabajen en ramas cortas e independientes, incorporen cambios por Pull Request y validen lo que exige el enunciado de PC4.
 
@@ -47,6 +48,57 @@ py -3 tools/smoke_test.py
 
 La prueba compila Java/Kotlin, inicia tres procesos locales en puertos **19101-19103** y verifica **6 llamadas cruzadas** entre los tres lenguajes. `PASS` confirma únicamente conectividad y compatibilidad del contrato inicial, no consenso ni replicación.
 
+## 2b. Nodo Python con Raft (DM2 binario)
+
+`nodes/python/node.py` acepta el mismo CLI que `NodeMain` de Java: `--id`, `--host`, `--port`,
+`--data-dir`, `--peer ID=HOST:PUERTO` (uno por cada otra réplica), `--members`, `--ping` e
+`--inspect`, más `--algo raft` (2PC llega en la fase III). Sin `--data-dir` el nodo solo atiende
+PING DM1 y cierra las RPC Raft, igual que Java.
+
+Clúster local de tres nodos Python (una terminal por nodo):
+
+```bash
+# Ubuntu
+python3 nodes/python/node.py --id n1 --host 127.0.0.1 --port 9101 --data-dir data/n1 --peer n2=127.0.0.1:9102 --peer n3=127.0.0.1:9103
+python3 nodes/python/node.py --id n2 --host 127.0.0.1 --port 9102 --data-dir data/n2 --peer n1=127.0.0.1:9101 --peer n3=127.0.0.1:9103
+python3 nodes/python/node.py --id n3 --host 127.0.0.1 --port 9103 --data-dir data/n3 --peer n1=127.0.0.1:9101 --peer n2=127.0.0.1:9102
+```
+
+```powershell
+# Windows
+py -3 nodes\python\node.py --id n1 --host 127.0.0.1 --port 9101 --data-dir data\n1 --peer n2=127.0.0.1:9102 --peer n3=127.0.0.1:9103
+py -3 nodes\python\node.py --id n2 --host 127.0.0.1 --port 9102 --data-dir data\n2 --peer n1=127.0.0.1:9101 --peer n3=127.0.0.1:9103
+py -3 nodes\python\node.py --id n3 --host 127.0.0.1 --port 9103 --data-dir data\n3 --peer n1=127.0.0.1:9101 --peer n2=127.0.0.1:9102
+```
+
+Estado persistido de un nodo (mismos argumentos más `--inspect`; muestra cada entrada con su
+estado `COMMITTED`/`PENDING` y los bytes del comando en hex). En Java, detener antes el nodo,
+porque bloquea su directorio:
+
+```bash
+python3 nodes/python/node.py --id n2 --data-dir data/n2 --peer n1=127.0.0.1:9101 --peer n3=127.0.0.1:9103 --inspect
+```
+
+```powershell
+py -3 nodes\python\node.py --id n2 --data-dir data\n2 --peer n1=127.0.0.1:9101 --peer n3=127.0.0.1:9103 --inspect
+```
+
+Partición simulada de un nodo Python (para demos): crear `<data-dir>/fault.json` con
+`{"isolated": true}`; el nodo deja de responder, de enviar y de procesar respuestas. Con
+`{"isolated": false}` (o borrando el archivo) se reincorpora.
+
+Pruebas de consenso (los datos y logs quedan en un directorio temporal que el script imprime):
+
+```bash
+python3 tools/fault_simulator.py       # 3 nodos Python: partición, caída y recuperación
+python3 tools/mixed_cluster_test.py    # n1 Java + n2/n3 Python, con líder Java y con líder Python
+```
+
+```powershell
+py -3 tools\fault_simulator.py
+py -3 tools\mixed_cluster_test.py
+```
+
 ## 3. Arrancar en las tres computadoras reales
 
 Todos deben clonar la misma versión de `main` (o extraer el ZIP para pruebas). **Ejemplos de IP, no direcciones reales del equipo:**
@@ -66,8 +118,16 @@ bash scripts/ubuntu_nodo1.sh
 ### Windows A: nodo 2
 
 ```powershell
-.\scripts\windows_nodo2.ps1
+.\scripts\windows_nodo2.ps1 -N1 192.168.1.101:9101 -N3 192.168.1.103:9103
 ```
+
+El script ejecuta el nodo Python con Raft:
+`py -3 nodes\python\node.py --id n2 --host 0.0.0.0 --port 9102 --data-dir data\n2 --peer n1=192.168.1.101:9101 --peer n3=192.168.1.103:9103`.
+El equivalente en Ubuntu es
+`python3 nodes/python/node.py --id n2 --host 0.0.0.0 --port 9102 --data-dir data/n2 --peer n1=192.168.1.101:9101 --peer n3=192.168.1.103:9103`.
+Para que Java participe en Raft, `n1` debe arrancarse con `--data-dir` y los dos `--peer`
+(ver [docs/06_RAFT_JAVA.md](docs/06_RAFT_JAVA.md)). El nodo Kotlin aún no implementa
+la replicación DM2 (fase IV).
 
 ### Windows B: nodo 3
 
