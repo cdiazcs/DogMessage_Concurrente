@@ -78,3 +78,48 @@ confirmaciones al perder mayoría, caída del líder después de confirmar,
 reconciliación, recuperación del índice y aplicación única por solicitud.
 La integración DM2 trilingüe, la LAN y las mediciones de rendimiento
 del clúster quedan pendientes.
+
+## Raft Python sobre DM2 binario — fase I (sub-paso I.3)
+
+El motor del integrante de Python (`nodes/python/raft_engine.py`, `storage.py`) ya habla DM2
+binario mediante `nodes/python/dm2_codec.py` y `nodes/python/node.py`. Su estructura original
+se conservó: en la fase I solo se cambió lo que el contrato DM2 o la interoperabilidad con Java
+exigían.
+
+```bash
+python3 -m unittest tests.test_raft_python -v   # Windows: py -3 -m unittest tests.test_raft_python -v
+python3 tools/fault_simulator.py                # Windows: py -3 tools\fault_simulator.py
+```
+
+`fault_simulator.py` conserva los cuatro escenarios originales con 3 nodos Python: elección y 5
+comandos; partición del líder (aislamiento local mediante `<data-dir>/fault.json`, porque DM2 no
+define mensajes de control), reelección y 5 comandos; sanación y sincronización; caída abrupta
+del nuevo líder, reinicio desde disco y comparación con `--inspect` de las entradas comprometidas
+de los 3 nodos.
+
+### Corregido en la fase I porque bloqueaba la interoperabilidad o violaba el contrato DM2
+
+| Problema original | Por qué bloqueaba | Corrección | Test |
+|---|---|---|---|
+| Éxito de AppendEntries con `matchIndex=len(log)` | Java descarta todo éxito cuyo `matchIndex` difiera de `prevLog.index + entryCount`: un seguidor Python nunca avanzaba | `matchIndex = prevLog.index + entryCount` | `test_match_index_is_end_of_batch_not_log_length` |
+| Seguidor con `commitIndex = min(leaderCommit, len(log))` | Podía comprometer un sufijo local no verificado; el contrato exige `min(leaderCommit, matchIndex)` | Se usa `matchIndex` y el commit solo aumenta | ídem |
+| `commit_index = len(log)` al reiniciar | Daba por comprometidas entradas pendientes; `--inspect` difería entre nodos | `commitIndex` se persiste y se recupera de disco | `test_commit_index_survives_restart` |
+| Rechazo con `matchIndex` ≠ 0 | Respuesta inválida en DM2 | Fallo siempre con `matchIndex=0` | `test_heartbeat_origin_and_mismatch` |
+| Lotes sin límite de entradas | DM2 admite 0…256 entradas y 1 MiB de cuerpo | Lote acotado igual que `RaftLog.batch` de Java | `test_leader_batches_are_bounded` |
+| Reenvío interno del comando al líder desde un seguidor | El contrato y Java responden `NOT_LEADER` con `leaderHint` | Sin reenvío; `NOT_LEADER` + `leaderHint` | `test_follower_answers_not_leader_with_hint` |
+| Idempotencia solo por `requestId` | El contrato deduplica por `(clientId, clientRequestId)` y exige `REQUEST_ID_CONFLICT` | Búsqueda por el par y comparación de bytes | `test_leader_deduplicates_and_detects_conflicts` |
+| Estado corrupto se reiniciaba en blanco | Perder `votedFor` permite votar dos veces en un término | `StorageError` y el nodo no arranca | `test_corrupt_state_is_not_silently_reset` |
+| Truncado del log en un conflicto de `prevLog` sin protección | Podía borrar el prefijo comprometido | Solo se trunca por encima de `commitIndex` | — |
+
+### Pendiente de la fase II (no corregido en la fase I)
+
+| Bug | Ubicación (`raft_engine.py`) | Riesgo |
+|---|---|---|
+| `_step_down` borra `votedFor` sin subir el término cuando un candidato recibe AppendEntries de su mismo término | `_step_down`, llamado desde `append_entries` | Doble voto en un término |
+| Falta la entrada NO_OP al asumir el liderazgo | `_become_leader` | Entradas de términos previos no se comprometen hasta que llega un comando nuevo |
+| Un hilo nuevo por peer en cada heartbeat y elección, sin límite de RPC en vuelo | `_replicate_to_all_peers`, `_start_election` | Acumulación de hilos con un peer lento o caído; respuestas fuera de orden |
+| `sleep` con el lock tomado (retardo artificial de fallos) | `_available` | Bloquea todo el motor mientras dura el retardo |
+| Cada escritura reescribe todo el estado (JSON completo) | `storage.py` | Coste O(n) por entrada: relevante para el benchmark de la fase VIII |
+| Sin bloqueo exclusivo del directorio de datos | `storage.py` | Dos procesos con el mismo `--data-dir` se pisarían (Java sí lo bloquea) |
+| `tools/benchmark_and_report.py` sigue en el protocolo JSON anterior y usa `matplotlib` (dependencia externa) | herramienta | No ejecutable hasta migrarlo (fase VIII) |
+| `secondary_engine.py` (2PC) sigue importando `protocol_dm2` y tiene los bugs listados en CLAUDE.md | 2PC | Fase III |
