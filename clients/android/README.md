@@ -1,5 +1,9 @@
-# Cliente Android (PENDIENTE)
+# Cliente Android
 
-Responsable sugerido: integrante Windows/Kotlin. Crear aplicación en Android Studio a partir de herramientas autorizadas por el docente y separar UI de transporte TCP y motor de cifrado. No usar WebSocket, Socket.io ni bibliotecas de mensajería.
+La aplicación Kotlin está en `DogMessengerApp`. Usa el gateway DOG/1 con
+sockets TLS. La sesión se conserva en memoria y la sincronización periódica
+se pausa al salir de la pantalla. Se utiliza el Gradle Wrapper del proyecto.
 
-**No confundir cliente Android con nodo Kotlin/JVM**: la PC4 pide tres nodos de consenso; Android se conecta como cliente. Implementar chats, grupos, archivos, QR y E2EE solo cuando exista su contrato y autorización sobre bibliotecas QR. Probar con servidor simulado mientras los nodos se desarrollan.
+Requisitos y pasos de instalación, confianza de CA de ensayo y arranque en
+la [guía de clientes](../../docs/CLIENTES.md). La compilación requiere
+Android SDK 36.1 y JDK 21.

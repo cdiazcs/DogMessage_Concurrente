@@ -1,4 +1,54 @@
+# Compilados
+build/
+out/
+*.jar
+!clients/android/DogMessengerApp/gradle/wrapper/gradle-wrapper.jar
+*.class
+*.exe
+*.apk
+*.aab
 
-data/
-data_*/
+# Configuración local e IDE
+.idea/
+.vscode/
+*.iml
+.gradle/
+.kotlin/
+local.properties
+.env
+.env.local
+.env.*.local
+*.env
+.venv/
+
+# Datos de ejecución y temporales
+data*/
+/logs/
 __pycache__/
+*.py[cod]
+.pytest_cache/
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Configuración y evidencias de operación locales
+/config/cluster.local.json
+/reports/
+/config/cluster.2pc.local.json
+/config/cluster.chat.local.json
+/config/cluster.chat.*.local.json
+
+# Secretos y certificados
+*.key
+*.pem
+*.jks
+*.p12
+
+# Herramientas locales
+.github/modernize/
+.agents/
+.aws/
+.codex/

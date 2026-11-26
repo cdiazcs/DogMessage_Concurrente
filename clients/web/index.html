@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dog Messenger</title>
+<link rel="stylesheet" href="/styles.css">
+<script src="/e2ee.js" defer></script>
+<script src="/app.js" defer></script>
+</head>
+<body>
+<header><h1>Dog Messenger</h1><span id="connection" role="status">Sin sesión</span></header>
+<main>
+<section id="auth">
+<h2>Tu cuenta</h2>
+<form id="credentials">
+<label>Usuario<input name="username" autocomplete="username" required></label>
+<label>Nombre para registro<input name="display" autocomplete="name"></label>
+<label>Contraseña<input type="password" name="password" autocomplete="current-password" required></label>
+<div class="actions"><button value="login">Iniciar sesión</button><button value="register">Registrar</button></div>
+</form>
+</section>
+<section id="workspace" hidden>
+<aside>
+<div class="actions"><strong id="identity"></strong><button id="logout">Salir</button></div>
+<button id="device">Identidad de dispositivo</button>
+<button id="device-revoke">Revocar dispositivo</button>
+<div class="actions"><button id="link-start">Solicitar vínculo</button><button id="link-approve">Autorizar vínculo</button>
+<button id="link-status">Consultar vínculo</button><button id="link-cancel">Cancelar vínculo</button></div>
+<h2>Conversaciones</h2><nav id="conversations" aria-label="Conversaciones"></nav>
+<h2>Usuarios</h2><label>Buscar<input id="search" type="search"></label><div id="users"></div>
+<form id="group"><label>Nombre del grupo<input name="name" required></label><button>Crear grupo</button></form>
+</aside>
+<section class="thread">
+<h2 id="title">Elige una conversación</h2>
+<button id="secure" hidden>Configurar cifrado</button>
+<button id="share-history" hidden>Compartir claves de historial</button>
+<div class="actions" id="members" hidden><button id="list-members">Integrantes</button><button id="add">Añadir</button><button id="remove">Retirar</button></div>
+<button id="more" hidden>Cargar siguiente página</button>
+<ol id="messages" aria-label="Mensajes"></ol>
+<form id="composer" hidden><label>Mensaje<input name="text" required></label><button>Enviar</button></form>
+<button id="retry" hidden>Reintentar envío</button>
+<div id="media" hidden>
+<label>Adjuntar imagen o archivo<input type="file" id="attachment"></label>
+<div class="actions">
+<button type="button" id="upload">Enviar archivo</button>
+<button type="button" id="resume-upload" hidden>Reanudar</button>
+<button type="button" id="cancel-upload" hidden>Cancelar</button>
+</div>
+<progress id="transfer-progress" value="0" max="1" aria-label="Progreso del archivo" hidden></progress>
+<p id="transfer-state" role="status"></p>
+</div>
+</section>
+</section>
+<p id="feedback" role="status" aria-live="polite"></p>
+<dialog id="link-dialog">
+<h2>Vínculo de dispositivo</h2>
+<img id="link-image" alt="QR público de vinculación" hidden>
+<p id="link-fingerprint"></p>
+<label>Descriptor público<textarea id="link-descriptor" rows="5" spellcheck="false"></textarea></label>
+<label>Leer imagen QR si el navegador lo admite<input type="file" id="link-scan" accept="image/png,image/jpeg"></label>
+<div class="actions"><button id="link-confirm">Revisar autorización</button><button id="link-close">Cerrar</button></div>
+</dialog>
+</main>
+</body>
+</html>

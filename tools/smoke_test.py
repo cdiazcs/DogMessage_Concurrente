@@ -45,7 +45,10 @@ def run(skip_kotlin: bool):
             for node_id, cmd, port in selected:
                 if is_listening(port):
                     raise RuntimeError(f"Puerto {port} ocupado; cierra otras instancias")
-                proc = subprocess.Popen(cmd + ["--id", node_id, "--host", "127.0.0.1", "--port", str(port)], stdout=logs, stderr=subprocess.STDOUT)
+                args = cmd + ["--id", node_id, "--host", "127.0.0.1", "--port", str(port)]
+                if node_id == "n3":
+                    args.append("--diagnostic")
+                proc = subprocess.Popen(args, stdout=logs, stderr=subprocess.STDOUT)
                 processes.append(proc)
                 wait_for(port, proc)
             checks = 0

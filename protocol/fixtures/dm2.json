@@ -1,0 +1,329 @@
+[
+  {
+    "name": "vote_empty_log",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e31000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "decode",
+      "term": 3,
+      "lastLogIndex": 0,
+      "lastLogTerm": 0
+    }
+  },
+  {
+    "name": "vote_granted",
+    "direction": "client",
+    "hex": "00000022444d320001810123456789abcdef0123456789abcdef026e32000000000000000301",
+    "expected": {
+      "action": "decode",
+      "term": 3,
+      "voteGranted": true
+    }
+  },
+  {
+    "name": "vote_denied",
+    "direction": "client",
+    "hex": "00000022444d320001810123456789abcdef0123456789abcdef026e32000000000000000400",
+    "expected": {
+      "action": "decode",
+      "term": 4,
+      "voteGranted": false
+    }
+  },
+  {
+    "name": "heartbeat",
+    "direction": "server",
+    "hex": "0000003b444d320001020123456789abcdef0123456789abcdef026e3100000000000000040000000000000007000000000000000300000000000000090000",
+    "expected": {
+      "action": "decode",
+      "term": 4,
+      "prevLogIndex": 7,
+      "prevLogTerm": 3,
+      "leaderCommit": 9,
+      "entryCount": 0
+    }
+  },
+  {
+    "name": "append_two_entries",
+    "direction": "server",
+    "hex": "00000067444d320001020123456789abcdef0123456789abcdef026e3100000000000000040000000000000007000000000000000300000000000000090002000000000000000400000000000000000401026331fedcba9876543210fedcba98765432100000000300ff80",
+    "expected": {
+      "action": "decode",
+      "term": 4,
+      "prevLogIndex": 7,
+      "prevLogTerm": 3,
+      "leaderCommit": 9,
+      "entryCount": 2,
+      "entryIndexes": [
+        8,
+        9
+      ],
+      "entryTerms": [
+        4,
+        4
+      ],
+      "entryKinds": [
+        0,
+        1
+      ],
+      "clientId": "c1",
+      "clientRequestId": "fedcba9876543210fedcba9876543210",
+      "commandHex": "00ff80"
+    }
+  },
+  {
+    "name": "append_success",
+    "direction": "client",
+    "hex": "0000002a444d320001820123456789abcdef0123456789abcdef026e320000000000000004010000000000000009",
+    "expected": {
+      "action": "decode",
+      "term": 4,
+      "success": true,
+      "matchIndex": 9
+    }
+  },
+  {
+    "name": "append_rejected",
+    "direction": "client",
+    "hex": "0000002a444d320001820123456789abcdef0123456789abcdef026e320000000000000004000000000000000000",
+    "expected": {
+      "action": "decode",
+      "term": 4,
+      "success": false,
+      "matchIndex": 0
+    }
+  },
+  {
+    "name": "command_opaque",
+    "direction": "server",
+    "hex": "00000020444d320001030123456789abcdef0123456789abcdef0263310000000300ff80",
+    "expected": {
+      "action": "decode",
+      "commandHex": "00ff80"
+    }
+  },
+  {
+    "name": "client_result_0",
+    "direction": "client",
+    "hex": "00000023444d320001830123456789abcdef0123456789abcdef026e3200000000000000000900",
+    "expected": {
+      "action": "decode",
+      "status": 0,
+      "logIndex": 9,
+      "leaderHint": null
+    }
+  },
+  {
+    "name": "client_result_1",
+    "direction": "client",
+    "hex": "00000025444d320001830123456789abcdef0123456789abcdef026e32010000000000000000026e31",
+    "expected": {
+      "action": "decode",
+      "status": 1,
+      "logIndex": 0,
+      "leaderHint": "n1"
+    }
+  },
+  {
+    "name": "client_result_2",
+    "direction": "client",
+    "hex": "00000023444d320001830123456789abcdef0123456789abcdef026e3202000000000000000000",
+    "expected": {
+      "action": "decode",
+      "status": 2,
+      "logIndex": 0,
+      "leaderHint": null
+    }
+  },
+  {
+    "name": "client_result_3",
+    "direction": "client",
+    "hex": "00000023444d320001830123456789abcdef0123456789abcdef026e3203000000000000000000",
+    "expected": {
+      "action": "decode",
+      "status": 3,
+      "logIndex": 0,
+      "leaderHint": null
+    }
+  },
+  {
+    "name": "correlated_error",
+    "direction": "client",
+    "hex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203",
+    "expected": {
+      "action": "decode",
+      "code": 3
+    }
+  },
+  {
+    "name": "empty_frame",
+    "direction": "server",
+    "hex": "00000000",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "oversized_frame",
+    "direction": "server",
+    "hex": "00100001",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "truncated_frame",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e310000000000000003000000000000000000000000000000",
+    "expected": {
+      "action": "close"
+    },
+    "endOfStream": true
+  },
+  {
+    "name": "unknown_magic",
+    "direction": "server",
+    "hex": "00000031444d390001010123456789abcdef0123456789abcdef026e31000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "invalid_sender",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e7c000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "null_request_id",
+    "direction": "server",
+    "hex": "00000031444d3200010100000000000000000000000000000000026e31000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "response_sent_to_server",
+    "direction": "server",
+    "hex": "00000022444d320001810123456789abcdef0123456789abcdef026e32000000000000000301",
+    "expected": {
+      "action": "close"
+    }
+  },
+  {
+    "name": "unsupported_algorithm",
+    "direction": "server",
+    "hex": "00000031444d320002010123456789abcdef0123456789abcdef026e31000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "error",
+      "code": 1,
+      "responseHex": "0000001a444d320002ff0123456789abcdef0123456789abcdef026e3201"
+    }
+  },
+  {
+    "name": "unknown_type",
+    "direction": "server",
+    "hex": "00000019444d320001040123456789abcdef0123456789abcdef026e31",
+    "expected": {
+      "action": "error",
+      "code": 2,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3202"
+    }
+  },
+  {
+    "name": "trailing_payload_byte",
+    "direction": "server",
+    "hex": "00000032444d320001010123456789abcdef0123456789abcdef026e3100000000000000030000000000000000000000000000000000",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "r64_out_of_range",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e31800000000000000000000000000000000000000000000000",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "invalid_log_origin",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e31000000000000000300000000000000000000000000000001",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "invalid_entry_count",
+    "direction": "server",
+    "hex": "0000003b444d320001020123456789abcdef0123456789abcdef026e3100000000000000040000000000000007000000000000000300000000000000090101",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "index_overflow",
+    "direction": "server",
+    "hex": "00000044444d320001020123456789abcdef0123456789abcdef026e3100000000000000047fffffffffffffff000000000000000300000000000000000001000000000000000400",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "empty_command",
+    "direction": "server",
+    "hex": "0000001d444d320001030123456789abcdef0123456789abcdef02633100000000",
+    "expected": {
+      "action": "error",
+      "code": 3,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3203"
+    }
+  },
+  {
+    "name": "unknown_replica",
+    "direction": "server",
+    "hex": "00000031444d320001010123456789abcdef0123456789abcdef026e34000000000000000300000000000000000000000000000000",
+    "expected": {
+      "action": "error",
+      "code": 4,
+      "responseHex": "0000001a444d320001ff0123456789abcdef0123456789abcdef026e3204"
+    }
+  },
+  {
+    "name": "invalid_vote_boolean",
+    "direction": "client",
+    "hex": "00000022444d320001810123456789abcdef0123456789abcdef026e32000000000000000302",
+    "expected": {
+      "action": "discard"
+    }
+  },
+  {
+    "name": "append_failure_nonzero_index",
+    "direction": "client",
+    "hex": "0000002a444d320001820123456789abcdef0123456789abcdef026e320000000000000004000000000000000009",
+    "expected": {
+      "action": "discard"
+    }
+  },
+  {
+    "name": "response_request_id_mismatch",
+    "direction": "client",
+    "hex": "00000022444d32000181fedcba9876543210fedcba9876543210026e32000000000000000301",
+    "expected": {
+      "action": "discard"
+    }
+  }
+]

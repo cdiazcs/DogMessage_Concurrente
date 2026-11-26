@@ -1,155 +1,139 @@
-# Dog Messenger · PC4 2026-II — BASE `main` (v0.1.0)
+# Dog Messenger · PC4 CC4P1 2026-II
 
-> **Estado: starter funcional de conectividad, NO es el proyecto terminado.**
-> Los tres servidores en Java, Python y Kotlin comparten un protocolo TCP sin bibliotecas externas de comunicación.
-> **No están implementados aún:** Raft, el segundo algoritmo asignado, chat, QR, móvil, web, transferencia de archivos, cifrado E2EE, persistencia, comparaciones de rendimiento.
+Sistema de mensajería distribuida (desktop, web y móvil) cuyo historial se replica
+entre tres nodos mediante **Raft** y **Two-Phase Commit (2PC)**, implementados desde
+cero con sockets TCP e hilos de la biblioteca estándar de cada lenguaje.
 
-Este repositorio está preparado para que **3 integrantes** trabajen en ramas cortas e independientes, incorporen cambios por Pull Request y validen lo que exige el enunciado de PC4.
+**Universidad Nacional de Ingeniería · Programación Concurrente y Distribuida**
 
-## 0. ¿Qué contiene el ZIP?
-
-| Parte | Estado inicial | Responsable sugerido |
-|---|---|---|
-| `nodes/java` | Servidor/cliente TCP PING/PONG compilable | Ubuntu (integrante 1) |
-| `nodes/python` | Servidor/cliente TCP PING/PONG ejecutable | Windows (integrante 2) |
-| `nodes/kotlin` | Servidor/cliente TCP PING/PONG compilable | Windows (integrante 3) |
-| `protocol/` | Contrato DM1, versión y ejemplos | Los 3 revisan |
-| `tests/`, `tools/` | Pruebas unitarias y prueba cruzada local | Los 3 |
-| `clients/` | Carpetas y notas de implementación futura | Interfaces |
-| `docs/` | Arquitectura, criterios PC4 y plan de ramas | Los 3 |
-| `.github/` | Plantilla de PR y verificaciones iniciales | Los 3 |
-
-## 1. Requisitos del equipo
-
-- **Java JDK 17 o superior**: comandos `java` y `javac`.
-- **Python 3.10 o superior**: `python`/`py -3` en Windows; `python3` en Ubuntu.
-- **Kotlin/JVM compiler**: comando `kotlinc` (compatible con JDK 17 o superior). Este compilador se instala como herramienta de desarrollo. No se distribuyen bibliotecas de comunicación.
-- **Git** y cuenta en GitHub, con acceso al mismo repositorio.
-- Las 3 computadoras en una **red LAN/WiFi que permita conexiones entre equipos**; abrir TCP **9101, 9102 y 9103** en el firewall local si es necesario.
-
-> Kotlin/JVM (servidor) y Kotlin Android (cliente futuro) son componentes distintos. El nodo Kotlin incluido NO es una aplicación Android.
-
-## 2. Probar todo en UNA computadora antes de conectar la LAN
-
-Desde la carpeta raíz del repositorio:
-
-```bash
-python3 -m unittest discover -s tests -p 'test_*.py' -v
-python3 tools/smoke_test.py
-```
-
-En Windows, cambia `python3` por `py -3` si corresponde:
-
-```powershell
-py -3 -m unittest discover -s tests -p 'test_*.py' -v
-py -3 tools/smoke_test.py
-```
-
-La prueba compila Java/Kotlin, inicia tres procesos locales en puertos **19101-19103** y verifica **6 llamadas cruzadas** entre los tres lenguajes. `PASS` confirma únicamente conectividad y compatibilidad del contrato inicial, no consenso ni replicación.
-
-## 3. Arrancar en las tres computadoras reales
-
-Todos deben clonar la misma versión de `main` (o extraer el ZIP para pruebas). **Ejemplos de IP, no direcciones reales del equipo:**
-
-| Equipo | IP de EJEMPLO | Nodo | Puerto |
+| Nodo | Lenguaje | Equipo | Integrante |
 |---|---|---|---|
-| Ubuntu | `192.168.1.101` | `n1` Java | `9101` |
-| Windows A | `192.168.1.102` | `n2` Python | `9102` |
-| Windows B | `192.168.1.103` | `n3` Kotlin/JVM | `9103` |
+| `n1` | Java (LP1) | Ubuntu | Cristian Diaz |
+| `n2` | Python (LP2) | Windows | Maurizio Berdiales |
+| `n3` | Kotlin/JVM (LP3) | Windows |Enoc Rosales|
 
-### Ubuntu: nodo 1
+## Funcionalidades
+
+- **Consenso:** Raft (elección, replicación, compromiso, recuperación) y 2PC con
+  coordinador fijo. Los tres lenguajes forman un mismo clúster con el protocolo binario DM2.
+- **Chat:** usuarios, conversaciones privadas y grupales con orden consistente,
+  texto, imágenes y archivos.
+- **Cifrado punto a punto:** los nodos solo almacenan y replican texto cifrado.
+- **Vinculación de dispositivos:** un dispositivo nuevo recupera el historial
+  antiguo desde el log replicado.
+- **Clientes:** desktop (Java Swing), web (navegador) y Android, conectados mediante
+  un gateway TLS.
+
+## Requisitos
+
+- JDK 17 o superior (`java`, `javac`)
+- Python 3.10 o superior (`python3` en Ubuntu, `py -3` en Windows)
+- `kotlinc` para compilar el nodo Kotlin
+- Android Studio para el cliente móvil
+
+## Compilar
 
 ```bash
-bash scripts/ubuntu_nodo1.sh
+python3 tools/build_all.py --desktop      # Windows: py -3 tools/build_all.py --desktop
 ```
 
-### Windows A: nodo 2
+## Ejecutar el clúster en tres computadoras
 
+Reemplaza las IP de ejemplo por las reales. Para 2PC usa `--algo 2pc --coordinator n1`
+(o `-Algo 2pc -Coordinator n1`) y un directorio de datos distinto.
+
+**n1 · Ubuntu (Java)**
+```bash
+bash scripts/ubuntu_nodo1.sh --id n1 --host 0.0.0.0 --port 9101 --data-dir data/n1 \
+  --algo raft --chat-feed --members n1,n2,n3 \
+  --peer n2=192.168.1.102:9102 --peer n3=192.168.1.103:9103
+```
+
+**n2 · Windows (Python)**
 ```powershell
-.\scripts\windows_nodo2.ps1
+.\scripts\windows_nodo2.ps1 -Id n2 -BindHost 0.0.0.0 -Port 9102 -DataDir data/n2 `
+  -Algo raft -ChatFeed -Members 'n1,n2,n3' -Peer @('n1=192.168.1.101:9101','n3=192.168.1.103:9103')
 ```
 
-### Windows B: nodo 3
-
+**n3 · Windows (Kotlin)**
 ```powershell
-.\scripts\windows_nodo3.ps1
+.\scripts\windows_nodo3.ps1 -Id n3 -BindHost 0.0.0.0 -Port 9103 -DataDir data/n3 `
+  -Algo raft -ChatFeed -Members 'n1,n2,n3' -Peer @('n1=192.168.1.101:9101','n2=192.168.1.102:9102')
 ```
 
-### Verificar desde CUALQUIER equipo
-
-En Ubuntu, hacia Windows A:
-
+Verificar la conectividad entre nodos:
 ```bash
 java -cp build/java dogmessenger.NodeMain --id n1 --ping 192.168.1.102:9102
 ```
 
-En Windows A, hacia Ubuntu:
+Abre en el firewall solo el TCP entrante del puerto del nodo, limitado a las IP del
+equipo. Detalles en [docs/DESPLIEGUE.md](docs/DESPLIEGUE.md).
 
-```powershell
-py -3 nodes/python/node.py --id n2 --ping 192.168.1.101:9101
-```
-
-En Windows B, hacia Ubuntu (después de ejecutar el script, que compila el JAR):
-
-```powershell
-java -jar build/kotlin/dog-messenger-kotlin.jar --id n3 --ping 192.168.1.101:9101
-```
-
-Cambien las IP de EJEMPLO por las IP reales. `--host 0.0.0.0` escucha interfaces locales, **NO** significa que deban exponer los puertos a Internet. Use una red privada de confianza.
-
-### Puertos y firewall
-
-- En Windows, validar conectividad con `Test-NetConnection 192.168.1.101 -Port 9101` desde PowerShell.
-- En Ubuntu, revisar `ss -lnt | grep 9101`.
-- Autorizar entradas TCP en el firewall **solo para LAN privada y puertos necesarios**.
-- Si hay aislamiento entre clientes WiFi, conectarse a una red que permita tráfico entre dispositivos.
-
-## 4. Convertir este ZIP en la rama `main` de GitHub
-
-Desde la carpeta extraída (solo UNA persona hace el primer push):
+## Gateway y clientes
 
 ```bash
-git init
-git branch -M main
-git add .
-git commit -m "chore: base inicial PC4 con nodos TCP y protocolo DM1"
-git remote add origin https://github.com/ORGANIZACION/dog-messenger-pc4.git
-git push -u origin main
+python3 tools/gateway_test_certs.py data/gateway-tls
+export DOG_CHAT_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+export DOG_GATEWAY_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
+python3 gateway/chat_gateway.py --config config/cluster.chat.raft.example.json \
+  --origin https://localhost:8443 --cert data/gateway-tls/server.pem --key data/gateway-tls/server.key
 ```
 
-**Sustituir la URL de ejemplo por la URL verdadera** del repositorio vacío creado en GitHub. Si Git solicita nombre/correo: configurar `git config --global user.name ...` y `git config --global user.email ...`.
+- **Desktop:** `bash scripts/desktop.sh -Djavax.net.ssl.trustStore=data/gateway-tls/client.jks`
+  (Windows: `.\scripts\desktop.ps1 -TrustStore data/gateway-tls/client.jks`)
+- **Web:** abrir `https://localhost:8443`
+- **Android:** `cd clients/android/DogMessengerApp && ./gradlew assembleDebug` e instalar el APK
 
-Los otros integrantes **NO ejecutan `git init` para compartir código**: clonan la URL real:
+Las claves y certificados se generan para cada ensayo y no se incluyen en el repositorio.
+
+## Demostración
+
+1. **Nodos sincronizados:** enviar mensajes desde desktop, web y Android y comprobar
+   que los tres nodos tienen el mismo historial (`--inspect`).
+2. **Caída del líder:** detener el líder Raft y observar la elección de uno nuevo
+   con un término mayor.
+3. **Caída y recuperación:** detener un seguidor, seguir enviando mensajes, reiniciarlo
+   y verificar que se pone al día.
+4. **2PC:** repetir con `--algo 2pc` y mostrar el bloqueo cuando cae el coordinador.
+5. **Comparación:** tiempo de consenso por mensaje en Raft y en 2PC (ver Rendimiento).
+
+## Pruebas
 
 ```bash
-git clone https://github.com/ORGANIZACION/dog-messenger-pc4.git
-cd dog-messenger-pc4
+python3 -m unittest discover -s tests -p 'test_*.py'
+python3 tools/trilingual_cluster_test.py      # Raft con Java, Python y Kotlin
+python3 tools/two_phase_commit_test.py        # 2PC con caídas y recuperación
+python3 tools/chat_cluster_test.py            # chat sobre Raft y 2PC
 ```
+En Windows reemplaza `python3` por `py -3`.
 
-Una vez que exista `main`, configurar su protección: PR obligatorio, una revisión de un compañero y pruebas antes del merge. Revisar `CONTRIBUTING.md`.
-
-## 5. Primera rama de cada integrante
+## Rendimiento
 
 ```bash
-git switch main
-git pull --ff-only origin main
-git switch -c feat/java-raft-skeleton
+python3 tools/benchmark_and_report.py --config config/cluster.local.json
+```
+Genera CSV, gráficos y la tabla comparativa en `evidencias/benchmark/RESULTADOS.md`.
+
+| Métrica | Raft | 2PC |
+|---|---|---|
+| Latencia p50 / p95 | _completar_ | _completar_ |
+| Throughput (msg/s) | _completar_ | _completar_ |
+| Mensajes por commit | _completar_ | _completar_ |
+| Tolera caída de 1 nodo | Sí (mayoría 2/3) | No (requiere a todos) |
+
+## Estructura
+
+```
+nodes/java      Nodo n1: Raft, 2PC, chat y almacenamiento de archivos
+nodes/python    Nodo n2: Raft, 2PC y chat
+nodes/kotlin    Nodo n3: Raft, 2PC y chat
+gateway/        Gateway TLS entre clientes y clúster
+clients/        Desktop (Swing), web y Android
+protocol/       Contratos de los protocolos (DM2, 2PC, chat, cifrado, multimedia)
+tools/          Compilación, pruebas, demostración y benchmark
+docs/           Arquitectura, despliegue y clientes
+reports/        Resultados generados por pruebas y benchmark (no se versiona)
 ```
 
-Sustituye el nombre según el trabajo. **No crear ramas desde otras ramas de compañeros.** Las interfaces se acuerdan en `protocol/` antes de que los componentes dependan de su implementación. Usar tests locales y simuladores (*mocks*) cuando otra parte no esté lista.
-
-## 6. Documentos que deben leer todos
-
-1. [`CONTRIBUTING.md`](CONTRIBUTING.md): convención de Git y PR.
-2. [`protocol/CONTRATO_TCP_v1.md`](protocol/CONTRATO_TCP_v1.md): contrato exactamente implementado en los 3 lenguajes.
-3. [`docs/01_ARQUITECTURA.md`](docs/01_ARQUITECTURA.md): topología y límites técnicos.
-4. [`docs/02_PLAN_RAMAS.md`](docs/02_PLAN_RAMAS.md): plan de trabajo independiente y apoyo cruzado.
-5. [`docs/03_RUBRICA_TRAZABILIDAD.md`](docs/03_RUBRICA_TRAZABILIDAD.md): evidencia requerida y pendientes.
-6. [`docs/04_DISENO_CONSENSO.md`](docs/04_DISENO_CONSENSO.md): tareas correctas de Raft y algoritmo 2.
-7. [`docs/05_DECISIONES_ABIERTAS.md`](docs/05_DECISIONES_ABIERTAS.md): puntos a acordar con el docente.
-
-## 7. Compromiso de honestidad técnica
-
-No afirmar que un `PONG` comprueba consenso. El starter demuestra conectividad TCP, *framing* interoperable y uso inicial de hilos. **Para pasar la PC4 deben completar e integrar realmente el sistema y documentar pruebas.**
-
-**Fuente de requisitos:** `P4cc4P1-262_v04.pdf`, páginas 1-5 (documento de clase aportado por el grupo). El ZIP no contiene los PDF originales, evitando aumentar su tamaño y distribuir materiales innecesarios.
+Documentación: [arquitectura](docs/ARQUITECTURA.md), [despliegue](docs/DESPLIEGUE.md),
+[clientes](docs/CLIENTES.md) y [contrato DM2](protocol/CONTRATO_TCP_v2.md).
