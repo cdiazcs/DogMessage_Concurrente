@@ -1,3 +1,3 @@
-algorithm,messages_sent,committed,errors,total_time_s,throughput_ops_s,latency_mean_ms,latency_p50_ms,latency_p95_ms,latency_p99_ms,total_rpc_sent
-RAFT,100,100,0,1.3068,76.52,13.049,15.096,26.025,30.199,240
-2PC,100,100,0,3.6036,27.75,36.021,36.719,60.49,74.028,400
+algorithm,messages_sent,committed,errors,total_time_s,throughput_ops_s,latency_mean_ms,latency_p50_ms,latency_p95_ms,latency_p99_ms
+RAFT,100,100,0,1.8191,54.97,18.19,17.565,28.911,126.55
+2PC,100,0,100,9.9989,0.0,0.0,0.0,0.0,0.0
