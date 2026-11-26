@@ -18,6 +18,7 @@ local.properties
 .env
 .env.local
 .env.*.local
+*.env
 .venv/
 
 # Datos de ejecución y temporales
@@ -35,12 +36,19 @@ Thumbs.db
 
 # Configuración y evidencias de operación locales
 /config/cluster.local.json
-/reports/raft/
-/reports/2pc/
+/reports/
 /config/cluster.2pc.local.json
-/reports/chat/
 /config/cluster.chat.local.json
 /config/cluster.chat.*.local.json
-/reports/clients/
-/reports/media/
-/reports/e2ee/
+
+# Secretos y certificados
+*.key
+*.pem
+*.jks
+*.p12
+
+# Herramientas locales
+.github/modernize/
+.agents/
+.aws/
+.codex/

@@ -131,6 +131,9 @@ gateway/        Gateway TLS entre clientes y clúster
 clients/        Desktop (Swing), web y Android
 protocol/       Contratos de los protocolos (DM2, 2PC, chat, cifrado, multimedia)
 tools/          Compilación, pruebas, demostración y benchmark
-docs/           Arquitectura y despliegue
-evidencias/     Resultados de pruebas y rendimiento
+docs/           Arquitectura, despliegue y clientes
+reports/        Resultados generados por pruebas y benchmark (no se versiona)
 ```
+
+Documentación: [arquitectura](docs/ARQUITECTURA.md), [despliegue](docs/DESPLIEGUE.md),
+[clientes](docs/CLIENTES.md) y [contrato DM2](protocol/CONTRATO_TCP_v2.md).
