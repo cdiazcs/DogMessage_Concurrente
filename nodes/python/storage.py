@@ -13,7 +13,7 @@ import os
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional
+from typing import BinaryIO, List, Optional
 
 import dm2_codec as dm2
 
@@ -54,20 +54,57 @@ class NodeStorage:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.node_id = node_id
         self.state_file = self.directory / STATE_FILE
-        for stale in self.directory.glob("raft_state-*.tmp"):
-            try:
-                stale.unlink()  # Temporal de una escritura interrumpida: nunca se publicó.
-            except OSError:
-                pass
+        self._lock_file: Optional[BinaryIO] = None
+
+    def acquire(self) -> None:
+        """Reserva un único escritor por directorio, incluso ante otro proceso."""
+        if self._lock_file is not None:
+            raise StorageError("Directorio Raft ya reservado")
+        lock_file = (self.directory / "raft.lock").open("a+b")
+        try:
+            lock_file.seek(0)
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            lock_file.close()
+            raise StorageError(f"No se pudo bloquear el directorio Raft {self.directory}: {error}") from error
+        self._lock_file = lock_file
+        try:
+            for stale in self.directory.glob("raft_state-*.tmp"):
+                stale.unlink()
+        except OSError:
+            self.close()
+            raise
+
+    def close(self) -> None:
+        lock_file = self._lock_file
+        if lock_file is None:
+            return
+        self._lock_file = None
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock_file.seek(0)
+                msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+        finally:
+            lock_file.close()
 
     def load(self) -> PersistentState:
-        if not self.state_file.exists():
-            return PersistentState()
         try:
-            data = json.loads(self.state_file.read_text(encoding="utf-8"))
-            if data.get("format") != FORMAT or data.get("nodeId") != self.node_id:
+            content = self.state_file.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return PersistentState()
+        except (OSError, UnicodeError) as error:
+            raise StorageError(f"No se pudo leer {self.state_file}: {error}") from error
+        try:
+            data = json.loads(content)
+            if not isinstance(data, dict) or data.get("format") != FORMAT or data.get("nodeId") != self.node_id:
                 raise StorageError("Estado Raft de otro formato u otro nodo")
-            state = PersistentState(int(data["currentTerm"]), data["votedFor"], int(data["commitIndex"]),
+            state = PersistentState(data["currentTerm"], data["votedFor"], data["commitIndex"],
                                     [_entry_from_json(item) for item in data["log"]])
             for position, item in enumerate(data["log"], start=1):
                 if int(item["index"]) != position:
@@ -77,9 +114,11 @@ class NodeStorage:
                 if entry.term < previous:
                     raise StorageError("Términos del log decrecientes")
                 previous = entry.term
-            if state.current_term < previous or not 0 <= state.commit_index <= len(state.log):
+            if (type(state.current_term) is not int or type(state.commit_index) is not int
+                    or not previous <= state.current_term <= dm2.R64_MAX
+                    or not 0 <= state.commit_index <= len(state.log)):
                 raise StorageError("Término o commitIndex incompatibles con el log")
-            if state.voted_for is not None and not dm2.valid_node_id(state.voted_for):
+            if state.voted_for is not None and (state.current_term == 0 or not dm2.valid_node_id(state.voted_for)):
                 raise StorageError("votedFor inválido")
             return state
         except StorageError:
@@ -89,6 +128,8 @@ class NodeStorage:
             raise StorageError(f"No se pudo leer {self.state_file}: {error}") from error
 
     def save(self, state: PersistentState) -> None:
+        if self._lock_file is None:
+            raise OSError("La escritura Raft requiere el bloqueo del directorio")
         payload = {
             "format": FORMAT,
             "nodeId": self.node_id,

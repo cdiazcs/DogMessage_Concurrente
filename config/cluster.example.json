@@ -1,0 +1,9 @@
+{
+  "algorithm": "raft",
+  "members": ["n1", "n2", "n3"],
+  "nodes": [
+    {"id": "n1", "language": "java", "host": "192.168.1.101", "port": 9101, "data_dir": "data/n1"},
+    {"id": "n2", "language": "python", "host": "192.168.1.102", "port": 9102, "data_dir": "data/n2"},
+    {"id": "n3", "language": "kotlin", "host": "192.168.1.103", "port": 9103, "data_dir": "data/n3"}
+  ]
+}

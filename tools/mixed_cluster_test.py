@@ -62,6 +62,7 @@ class Round:
         self.report = report
         self.cluster: Optional[Cluster] = None
         self.leader: Optional[ClusterNode] = None
+        self.leader_terms: set[int] = set()
         self.sent: Dict[str, bytes] = {}  # comandos confirmados, indexados por su hex
         self.lock = threading.Lock()
 
@@ -86,6 +87,7 @@ class Round:
             leader = stable_leader(cluster)
             if leader is not None and leader.lang == self.target_lang:
                 self.leader = leader
+                self.leader_terms.add(int(leader.state()["term"]))
                 return f"3 nodos arriba; líder {self.target_lang} en el intento {attempt}"
             cluster.stop_all()
         raise StepFailed(f"No se logró un líder inicial {self.target_lang} en 5 intentos")
@@ -162,6 +164,7 @@ class Round:
         if new is None:
             raise StepFailed("No hubo reelección tras matar al líder")
         self.leader = new
+        self.leader_terms.add(int(new.state()["term"]))
         indexes = self.send_many(10, f"{self.target_lang}-fase2")
         alive = [n for n in self.cluster.nodes.values() if n.alive]
         self.cluster.wait_commit(alive, max(indexes), timeout=10)
@@ -190,9 +193,12 @@ class Round:
         keys = {(e[3], e[4]) for e in commands}
         if len(keys) != len(commands):
             raise StepFailed("Hay (clientId, clientRequestId) repetidos en el log comprometido")
-        no_ops = len(reference) - len(commands)
+        no_ops = [entry for entry in reference if entry[2] == "NO_OP"]
+        for term in self.leader_terms:
+            if sum(int(entry[1]) == term for entry in no_ops) != 1:
+                raise StepFailed(f"Se esperaba un NO_OP comprometido para el liderazgo del término {term}")
         return (f"{relation}; --inspect Java y Python: {len(reference)} entradas comprometidas idénticas "
-                f"({len(commands)} COMMAND = los 30 enviados, {no_ops} NO_OP)")
+                f"({len(commands)} COMMAND = los 30 enviados, {len(no_ops)} NO_OP)")
 
     def run(self) -> None:
         steps = [

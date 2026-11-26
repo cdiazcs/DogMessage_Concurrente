@@ -1,8 +1,12 @@
 package dogmessenger;
 
+import dogmessenger.twopc.Engine;
+import dogmessenger.chat.Feed;
+
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.SocketTimeoutException;
@@ -55,25 +59,37 @@ public final class NodeMain {
 
     public static void main(String[] args) {
         String id = null, host = "0.0.0.0", target = null, configuredMembers = null;
+        String algo = "raft", coordinator = null;
         Path dataDir = null;
-        boolean inspect = false;
+        boolean inspect = false, chatFeed = false;
         Map<String, InetSocketAddress> peers = new HashMap<>();
         int port = 9101;
         try {
             for (int i = 0; i < args.length; i++) {
                 switch (args[i]) {
                     case "--id" -> id = args[++i];
+                    case "--algo" -> algo = args[++i];
+                    case "--coordinator" -> coordinator = args[++i];
                     case "--host" -> host = args[++i];
                     case "--port" -> port = Integer.parseInt(args[++i]);
                     case "--ping" -> target = args[++i];
                     case "--members" -> configuredMembers = args[++i];
                     case "--data-dir" -> dataDir = Path.of(args[++i]);
                     case "--inspect" -> inspect = true;
+                    case "--chat-feed" -> chatFeed = true;
                     case "--peer" -> addPeer(peers, args[++i]);
                     default -> throw new IllegalArgumentException("Argumento desconocido " + args[i]);
                 }
             }
             requireId(id);
+            require(!chatFeed || ("127.0.0.1".equals(host) && dataDir != null && target == null && !inspect),
+                    "--chat-feed requiere servidor persistente en 127.0.0.1");
+            byte[] chatKey = chatFeed ? Feed.key() : null;
+            String localId = id;
+            require(algo.equals("raft") || algo.equals("2pc"), "Algoritmo inválido");
+            require(coordinator == null || algo.equals("2pc"), "--coordinator requiere 2pc");
+            require(!algo.equals("2pc") || (target == null && coordinator != null && dataDir != null),
+                    "2PC requiere --coordinator y --data-dir");
             require(!inspect || (dataDir != null && target == null), "--inspect requiere --data-dir");
             if (target != null) {
                 int separator = target.lastIndexOf(':');
@@ -89,10 +105,30 @@ public final class NodeMain {
                     : Set.copyOf(Arrays.asList(configuredMembers.split(",", -1)));
             if (configuredMembers == null) members.add(id);
             InetSocketAddress listen = new InetSocketAddress(host, port);
-            if (dataDir == null) {
+            if (algo.equals("2pc")) {
+                require(members.contains(id) && peers.keySet().equals(expectedPeers(members, id)),
+                        "Membresía y peers 2PC inconsistentes");
+                try (var engine = new Engine(id, coordinator, peers, dataDir, inspect)) {
+                    if (inspect) engine.inspect();
+                    else {
+                        var diagnostic = new RpcDispatcher(id, Set.of(id), new RpcHandler() {});
+                        try (var server = new TcpServer(listen, body ->
+                                chatKey != null && Feed.isFeed(body)
+                                        ? Feed.dispatch(body, localId, chatKey, engine::chatSnapshot)
+                                        : hasMagic(ByteBuffer.wrap(body), DM1_MAGIC)
+                                            ? diagnostic.dispatch(body) : engine.dispatch(body),
+                                16, 32)) {
+                            System.out.printf("[2PC %s] LISTEN %s:%d coordinator=%s%n", id, host, server.port(), coordinator);
+                            engine.start();
+                            server.serve();
+                        }
+                    }
+                }
+            } else if (dataDir == null) {
                 require(peers.isEmpty(), "--peer requiere --data-dir");
-                serve(id, listen, members, new RpcHandler() {}, () -> {});
+                serve(id, listen, members, new RpcHandler() {}, () -> {}, null);
             } else {
+                require(!Files.exists(dataDir.resolve("twopc.lock")), "Raft exige un directorio distinto de 2PC");
                 try (var raft = new RaftNode(id, members, peers, dataDir)) {
                     if (inspect) {
                         printRaftState(raft.snapshot());
@@ -101,7 +137,7 @@ public final class NodeMain {
                     Thread shutdown = new Thread(raft::shutdown, "raft-shutdown");
                     Runtime.getRuntime().addShutdownHook(shutdown);
                     try {
-                        serve(id, listen, members, raft, raft::start);
+                        serve(id, listen, members, raft, raft::start, chatKey);
                     } finally {
                         try {
                             Runtime.getRuntime().removeShutdownHook(shutdown);
@@ -126,14 +162,25 @@ public final class NodeMain {
                     entry.index(), entry.term(), entry.type(),
                     entry.index() <= snapshot.commitIndex() ? "COMMITTED" : "PENDING",
                     entry.clientId(), entry.requestId(),
-                    entry.type() == RaftLog.EntryType.COMMAND ? HexFormat.of().formatHex(entry.payload()) : "-");
+                    entry.type() == RaftLog.EntryType.COMMAND ? Feed.diagnosticBytes(entry.payload()) : "-");
         }
     }
 
+    private static Set<String> expectedPeers(Set<String> members, String id) {
+        var expected = new HashSet<>(members);
+        expected.remove(id);
+        return expected;
+    }
+
     private static void serve(String id, InetSocketAddress listen, Set<String> members, RpcHandler handler,
-                              Runnable start) throws IOException {
+                              Runnable start, byte[] chatKey) throws IOException {
         var dispatcher = new RpcDispatcher(id, members, handler);
-        try (var server = new TcpServer(listen, dispatcher, 16, 32)) {
+        BodyDispatcher route = dispatcher;
+        if (chatKey != null && handler instanceof RaftNode raft) {
+            route = body -> Feed.isFeed(body)
+                    ? Feed.dispatch(body, id, chatKey, raft::chatSnapshot) : dispatcher.dispatch(body);
+        }
+        try (var server = new TcpServer(listen, route, 16, 32)) {
             System.out.println("[JAVA " + id + "] LISTEN " + listen.getHostString() + ":" + server.port()
                     + " protocol=DM1+DM2");
             start.run();
@@ -809,6 +856,8 @@ public final class NodeMain {
     }
 
     private static void syncDirectory(Path directory) throws IOException {
+        // El proveedor de Windows no permite abrir un directorio como FileChannel.
+        if (File.separatorChar == '\\') return;
         try (FileChannel parent = FileChannel.open(directory, StandardOpenOption.READ)) {
             parent.force(true);
         }
@@ -862,6 +911,15 @@ public final class NodeMain {
         public record Snapshot(RaftRole role, long term, String leader, long commitIndex, long lastApplied,
                                List<RaftLog.LogEntry> log, List<Long> appliedCommandIndexes,
                                Map<Long, Long> consensusNanos) {}
+
+        private synchronized Feed.Snapshot chatSnapshot(long after) {
+            var rows = new ArrayList<Feed.Entry>();
+            for (long pos = Math.min(after, lastApplied) + 1; pos <= lastApplied; pos++) {
+                var entry = raftLog.entryAt(pos);
+                if (entry.type() == RaftLog.EntryType.COMMAND) rows.add(new Feed.Entry(pos, entry.payload()));
+            }
+            return new Feed.Snapshot(lastApplied, rows);
+        }
 
         public synchronized Snapshot snapshot() {
             return new Snapshot(role, state.term(), leader, state.commitIndex(), lastApplied, raftLog.snapshot(),
@@ -986,9 +1044,12 @@ public final class NodeMain {
             } finally {
                 synchronized (this) {
                     inFlight.remove(peer);
-                    if (response != null && isCurrent(expectedRole, term)) {
+                    if (response != null && !stopped) {
                         try {
-                            acceptResponse(peer, response);
+                            long observedTerm = response instanceof VoteResponse vote ? vote.term()
+                                    : response instanceof AppendResponse append ? append.term() : 0;
+                            if (observedTerm > state.term()) observeHigherTerm(observedTerm);
+                            else if (isCurrent(expectedRole, term)) acceptResponse(peer, response);
                         } catch (IOException failure) {
                             // El fallo de persistencia ya detuvo el nodo Raft.
                         }
@@ -1003,11 +1064,9 @@ public final class NodeMain {
 
         private void acceptResponse(String peer, Payload response) throws IOException {
             if (response instanceof VoteResponse vote) {
-                if (vote.term() > state.term()) observeHigherTerm(vote.term());
-                else if (vote.voteGranted() && votes.add(peer) && votes.size() >= majority) becomeLeader();
+                if (vote.voteGranted() && votes.add(peer) && votes.size() >= majority) becomeLeader();
             } else if (response instanceof AppendResponse append) {
-                if (append.term() > state.term()) observeHigherTerm(append.term());
-                else updateProgress(peer, append);
+                updateProgress(peer, append);
             }
         }
 
@@ -1317,7 +1376,10 @@ public final class NodeMain {
         @Override public void close() throws IOException { lockChannel.close(); }
     }
 
-    public static final class RpcDispatcher {
+    @FunctionalInterface
+    public interface BodyDispatcher { byte[] dispatch(byte[] body) throws IOException; }
+
+    public static final class RpcDispatcher implements BodyDispatcher {
         private final String nodeId;
         private final Set<String> members;
         private final RpcHandler handler;
@@ -1456,12 +1518,12 @@ public final class NodeMain {
 
     public static final class TcpServer implements AutoCloseable {
         private final ServerSocketChannel listener;
-        private final RpcDispatcher dispatcher;
+        private final BodyDispatcher dispatcher;
         private final ThreadPoolExecutor workers;
         private final Set<SocketChannel> clients = new HashSet<>();
         private boolean closed;
 
-        public TcpServer(InetSocketAddress address, RpcDispatcher dispatcher, int threads, int queued)
+        public TcpServer(InetSocketAddress address, BodyDispatcher dispatcher, int threads, int queued)
                 throws IOException {
             require(threads > 0 && queued > 0, "Capacidades TCP inválidas");
             this.dispatcher = Objects.requireNonNull(dispatcher);

@@ -72,7 +72,7 @@ def run_fault_suite(workdir: Path) -> int:
         if leader3 is None:
             raise StepFailed("No hubo reelección tras la caída del proceso")
         before = int(leader3.state()["commit"])
-        recovered = leader2.inspect()  # El nodo Python permite inspeccionar sin bloquear el directorio.
+        recovered = leader2.inspect()  # El proceso anterior ya liberó el directorio.
         if len(committed_entries(recovered)) < 10:
             raise StepFailed(f"{leader2.node_id} perdió entradas comprometidas en disco")
         leader2.start()

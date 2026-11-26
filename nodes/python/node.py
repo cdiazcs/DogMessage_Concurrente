@@ -332,7 +332,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--members", help="IDs separados por coma (por defecto: --id y los --peer)")
     parser.add_argument("--ping", metavar="HOST:PUERTO")
     parser.add_argument("--inspect", action="store_true", help="Imprime el estado Raft persistido y sale")
-    parser.add_argument("--algo", choices=["raft"], default="raft", help="2PC llega en la fase III")
+    parser.add_argument("--algo", choices=["raft", "2pc"], default="raft")
+    parser.add_argument("--chat-feed", action="store_true", help="Feed autenticado de chat para 127.0.0.1")
+    parser.add_argument("--coordinator", help="ID del coordinador 2PC")
     return parser
 
 
@@ -342,6 +344,16 @@ def main(argv: Optional[list] = None) -> int:
     if not ID_RE.fullmatch(args.node_id):
         parser.error("--id debe tener 1-32 caracteres alfanuméricos, _ o -")
     try:
+        chat_key = None
+        if args.chat_feed:
+            if args.host != "127.0.0.1" or args.data_dir is None or args.ping or args.inspect:
+                raise ValueError("--chat-feed requiere servidor persistente en 127.0.0.1")
+            import chat_feed
+            chat_key = chat_feed.key()
+        if args.algo == "2pc" and (args.data_dir is None or args.ping):
+            raise ValueError("2PC requiere --data-dir y un modo de servidor o inspección")
+        if args.coordinator is not None and args.algo != "2pc":
+            raise ValueError("--coordinator requiere --algo 2pc")
         if args.ping:
             peer = TcpClient().ping(parse_endpoint(args.ping), args.node_id)
             print(f"OK {args.node_id} -> {args.ping}: PONG de {peer}")
@@ -368,12 +380,17 @@ def main(argv: Optional[list] = None) -> int:
             raise ValueError("Configura un --peer por cada otra réplica de --members")
         if len(set(peers.values())) != len(peers):
             raise ValueError("Los endpoints de los peers deben ser distintos")
+        if args.algo == "2pc":
+            import secondary_engine
+            return secondary_engine.run(args, members, peers, sys.modules[__name__], chat_key)
+        if (args.data_dir / "twopc.lock").exists():
+            raise ValueError("Raft exige un directorio distinto de 2PC")
         import raft_engine  # Import diferido: raft_engine no depende de este módulo.
         if args.inspect:
             return raft_engine.inspect(args.data_dir, args.node_id)
         engine = raft_engine.RaftEngine(args.node_id, peers, args.data_dir, TcpClient())
         try:
-            return serve(args.node_id, args.host, args.port, members, engine, on_listen=engine.start)
+            return serve(args.node_id, args.host, args.port, members, engine, on_listen=engine.start, chat_key=chat_key)
         finally:
             engine.stop()
     except Exception as error:  # noqa: BLE001 - incluye StorageError al recuperar
@@ -382,8 +399,19 @@ def main(argv: Optional[list] = None) -> int:
 
 
 def serve(node_id: str, host: str, port: int, members: Iterable[str], handler: RpcHandler,
-          on_listen=None) -> int:
+          on_listen=None, chat_key=None) -> int:
     dispatcher = Dispatcher(node_id, members, handler)
+    if chat_key is not None:
+        import chat_feed
+        delegate = dispatcher
+
+        class ChatDispatch:
+            def dispatch(self, body):
+                if chat_feed.is_feed(body):
+                    return chat_feed.dispatch(body, node_id, chat_key, handler.chat_snapshot)
+                return delegate.dispatch(body)
+
+        dispatcher = ChatDispatch()
     with TcpServer(host, port, dispatcher) as server:
         print(f"[PYTHON {node_id}] LISTEN {host}:{server.port} protocol=DM1+DM2", flush=True)
         if on_listen is not None:

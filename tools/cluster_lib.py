@@ -1,4 +1,4 @@
-"""Utilidades para levantar clústeres locales Java/Python y conversar con ellos en DM2 binario.
+"""Utilidades para levantar clústeres locales Java/Python/Kotlin y conversar con ellos en DM2 binario.
 
 Solo biblioteca estándar y pathlib: funciona igual en Ubuntu y Windows. El estado de cada nodo
 se obtiene de sus logs (formato común "[RAFT id] role=... term=...") y de --inspect.
@@ -52,13 +52,25 @@ class ClusterNode:
         self.peers: Dict[str, int] = {}
         self.proc: Optional[subprocess.Popen] = None
         self.isolated = False
+        self.coordinator = None
+        self.chat_feed = False
 
     @property
     def base(self) -> List[str]:
-        return java_command() if self.lang == "java" else python_command()
+        if self.lang == "java":
+            return java_command()
+        if self.lang == "kotlin":
+            return ["java", "-jar", str(ROOT / "build/kotlin/dog-messenger-kotlin.jar")]
+        return python_command()
 
-    def args(self) -> List[str]:
+    def args(self, *, allow_feed=True) -> List[str]:
         args = ["--id", self.node_id, "--host", HOST, "--port", str(self.port), "--data-dir", str(self.data_dir)]
+        if self.coordinator:
+            args += ["--algo", "2pc", "--coordinator", self.coordinator]
+        elif self.lang == "kotlin":
+            args += ["--algo", "raft"]
+        if self.chat_feed and allow_feed:
+            args += ["--chat-feed"]
         for peer, port in sorted(self.peers.items()):
             args += ["--peer", f"{peer}={HOST}:{port}"]
         return args
@@ -123,8 +135,8 @@ class ClusterNode:
         }
 
     def inspect(self) -> List[str]:
-        """Estado persistido. Java bloquea su directorio: inspeccionar con el nodo detenido."""
-        result = subprocess.run(self.base + self.args() + ["--inspect"], capture_output=True, text=True, timeout=60)
+        """Estado persistido. Inspeccionar con el nodo detenido para liberar el directorio."""
+        result = subprocess.run(self.base + self.args(allow_feed=False) + ["--inspect"], capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             raise StepFailed(f"--inspect de {self.node_id} falló: {result.stdout}{result.stderr}")
         return result.stdout.splitlines()

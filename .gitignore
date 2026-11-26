@@ -1,21 +1,46 @@
-# Binarios y compilados
+# Compilados
+build/
+out/
 *.jar
+!clients/android/DogMessengerApp/gradle/wrapper/gradle-wrapper.jar
 *.class
-/build/
 *.exe
+*.apk
+*.aab
 
-# IDE
+# Configuración local e IDE
 .idea/
 .vscode/
 *.iml
+.gradle/
+.kotlin/
+local.properties
+.env
+.env.local
+.env.*.local
+.venv/
 
-# Android
-clients/android/DogMessengerApp/build/
-clients/android/DogMessengerApp/.gradle/
-clients/android/DogMessengerApp/local.properties
-
-# Datos de ejecución y artefactos
+# Datos de ejecución y temporales
 data*/
-build/raft-*/
+/logs/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+*.log
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Configuración y evidencias de operación locales
+/config/cluster.local.json
+/reports/raft/
+/reports/2pc/
+/config/cluster.2pc.local.json
+/reports/chat/
+/config/cluster.chat.local.json
+/config/cluster.chat.*.local.json
+/reports/clients/
+/reports/media/
+/reports/e2ee/

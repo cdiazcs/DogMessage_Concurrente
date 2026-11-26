@@ -329,6 +329,55 @@ public final class RaftElectionTest {
         System.out.println("OK término superior en respuesta de voto correlacionada");
     }
 
+    private static void delayedHigherTermAfterSameTermStepDown() throws Exception {
+        try (var cluster = new Cluster()) {
+            var received = new CountDownLatch(1);
+            var release = new CountDownLatch(1);
+            RpcHandler remote = new RpcHandler() {
+                @Override public VoteResponse requestVote(Header header, RequestVote vote) throws IOException {
+                    received.countDown();
+                    try {
+                        if (!release.await(4, TimeUnit.SECONDS)) throw new IOException("Respuesta no liberada");
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException(interrupted);
+                    }
+                    return new VoteResponse(50, false);
+                }
+            };
+            var dispatcher = new RpcDispatcher("n3", Set.copyOf(IDS), remote);
+            try (var server = new TcpServer(cluster.endpoint("n3"), dispatcher, 1, 2)) {
+                var acceptor = Executors.newSingleThreadExecutor();
+                var serving = acceptor.submit(() -> { server.serve(); return null; });
+                try {
+                    cluster.start("n2");
+                    check(received.await(4, TimeUnit.SECONDS), "El voto saliente no llegó");
+                    var election = cluster.events("n2").stream().filter(e -> e.reason().equals("election"))
+                            .findFirst().orElseThrow();
+                    long term = election.term();
+                    check(send(cluster, "n1", new AppendEntries(term, ORIGIN, 0, List.of()))
+                            .equals(new AppendResponse(term, true, 0)), "El candidato acepta líder del mismo término");
+                    check(send(cluster, "n3", new RequestVote(term, ORIGIN)).equals(new VoteResponse(term, false)),
+                            "El candidato conserva su voto al pasar a seguidor");
+                    release.countDown();
+                    await("Respuesta tardía con término superior no persistida", () -> cluster.events("n2").stream()
+                            .filter(e -> e.role() == RaftRole.FOLLOWER && e.term() == 50
+                                    && e.reason().equals("higher-term")).findFirst().orElse(null));
+                    cluster.kill("n2");
+                    check(cluster.recover("n2").term() >= 50, "Término de la respuesta tardía recuperado");
+                } finally {
+                    release.countDown();
+                    acceptor.shutdownNow();
+                    serving.get(5, TimeUnit.SECONDS);
+                }
+            } catch (Exception | AssertionError failure) {
+                cluster.dump();
+                throw failure;
+            }
+        }
+        System.out.println("OK voto conservado y término superior persistido incluso al cambiar de rol");
+    }
+
     private static void replication() throws Exception {
         try (var cluster = new Cluster()) {
             try {
@@ -500,6 +549,7 @@ public final class RaftElectionTest {
         System.out.println("OK frescura de log por término e índice");
         votesAndRestart();
         higherTermInResponse();
+        delayedHigherTermAfterSameTermStepDown();
         electionAndFailover();
         replication();
         onlyCurrentTermAdvancesCommit();
